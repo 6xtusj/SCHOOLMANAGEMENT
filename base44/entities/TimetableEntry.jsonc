@@ -1,0 +1,76 @@
+{
+  "name": "TimetableEntry",
+  "type": "object",
+  "properties": {
+    "class_arm_id": {
+      "type": "string"
+    },
+    "class_arm_name": {
+      "type": "string"
+    },
+    "subject_id": {
+      "type": "string"
+    },
+    "subject_name": {
+      "type": "string"
+    },
+    "teacher_email": {
+      "type": "string"
+    },
+    "teacher_name": {
+      "type": "string"
+    },
+    "day": {
+      "type": "string",
+      "enum": [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday"
+      ]
+    },
+    "start_time": {
+      "type": "string"
+    },
+    "end_time": {
+      "type": "string"
+    },
+    "room": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "class_arm_id",
+    "day",
+    "start_time",
+    "end_time"
+  ],
+  "rls": {
+    "read": {},
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        }
+      ]
+    },
+    "update": {
+      "user_condition": {
+        "role": "admin"
+      }
+    },
+    "delete": {
+      "user_condition": {
+        "role": "admin"
+      }
+    }
+  }
+}

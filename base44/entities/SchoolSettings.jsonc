@@ -1,0 +1,108 @@
+{
+  "name": "SchoolSettings",
+  "type": "object",
+  "properties": {
+    "school_name": {
+      "type": "string"
+    },
+    "school_initials": {
+      "type": "string"
+    },
+    "school_logo": {
+      "type": "string"
+    },
+    "salary_payment_day": {
+      "type": "number",
+      "default": 25
+    },
+    "motto": {
+      "type": "string"
+    },
+    "address": {
+      "type": "string"
+    },
+    "phone": {
+      "type": "string"
+    },
+    "email": {
+      "type": "string"
+    },
+    "session": {
+      "type": "string"
+    },
+    "term": {
+      "type": "string"
+    },
+    "ca_weight": {
+      "type": "number",
+      "default": 40
+    },
+    "assignment_weight": {
+      "type": "number",
+      "default": 10
+    },
+    "test_weight": {
+      "type": "number",
+      "default": 10
+    },
+    "exam_weight": {
+      "type": "number",
+      "default": 40
+    },
+    "pass_mark": {
+      "type": "number",
+      "default": 40
+    },
+    "session_start_date": {
+      "type": "string"
+    },
+    "session_end_date": {
+      "type": "string"
+    },
+    "term_start_date": {
+      "type": "string"
+    },
+    "term_end_date": {
+      "type": "string"
+    },
+    "smtp_host": {
+      "type": "string"
+    },
+    "smtp_user": {
+      "type": "string"
+    },
+    "smtp_password": {
+      "type": "string"
+    },
+    "smtp_from": {
+      "type": "string"
+    },
+    "smtp_port": {
+      "type": "number"
+    },
+    "smtp_tls": {
+      "type": "boolean"
+    },
+    "smtp_ssl": {
+      "type": "boolean"
+    }
+  },
+  "rls": {
+    "read": {},
+    "create": {
+      "user_condition": {
+        "role": "admin"
+      }
+    },
+    "update": {
+      "user_condition": {
+        "role": "admin"
+      }
+    },
+    "delete": {
+      "user_condition": {
+        "role": "admin"
+      }
+    }
+  }
+}

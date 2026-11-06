@@ -1,0 +1,83 @@
+{
+  "name": "FeeItem",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "level": {
+      "type": "string"
+    },
+    "track": {
+      "type": "string"
+    },
+    "session": {
+      "type": "string"
+    },
+    "term": {
+      "type": "string"
+    },
+    "amount": {
+      "type": "number",
+      "default": 0
+    },
+    "active": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "required": [
+    "name",
+    "amount"
+  ],
+  "rls": {
+    "read": {},
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "User",
+  "type": "object",
+  "properties": {
+    "role": {
+      "type": "string",
+      "enum": [
+        "admin",
+        "principal",
+        "teacher",
+        "bursar",
+        "librarian",
+        "student",
+        "parent",
+        "user"
+      ],
+      "default": "user",
+      "description": "Portal role: admin, principal, teacher, bursar, librarian, student, parent"
+    },
+    "account_status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "active",
+        "suspended",
+        "deactivated"
+      ],
+      "default": "active",
+      "description": "Set by an administrator only",
+      "rls": {
+        "update": {
+          "user_condition": {
+            "role": "admin"
+          }
+        }
+      }
+    }
+  }
+}

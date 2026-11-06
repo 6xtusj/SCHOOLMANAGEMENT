@@ -1,0 +1,96 @@
+{
+  "name": "LibraryBook",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "author": {
+      "type": "string"
+    },
+    "isbn": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "default": "Textbook"
+    },
+    "level": {
+      "type": "string"
+    },
+    "subject_name": {
+      "type": "string"
+    },
+    "shelf": {
+      "type": "string"
+    },
+    "copies_total": {
+      "type": "number",
+      "default": 1
+    },
+    "copies_available": {
+      "type": "number",
+      "default": 1
+    },
+    "notes": {
+      "type": "string"
+    },
+    "active": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "required": [
+    "title"
+  ],
+  "rls": {
+    "read": {},
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    }
+  }
+}

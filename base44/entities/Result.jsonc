@@ -1,0 +1,186 @@
+{
+  "name": "Result",
+  "type": "object",
+  "properties": {
+    "student_id": {
+      "type": "string"
+    },
+    "student_name": {
+      "type": "string"
+    },
+    "student_email": {
+      "type": "string"
+    },
+    "guardian_email": {
+      "type": "string"
+    },
+    "admission_no": {
+      "type": "string"
+    },
+    "class_arm_id": {
+      "type": "string"
+    },
+    "class_arm_name": {
+      "type": "string"
+    },
+    "level": {
+      "type": "string"
+    },
+    "subject_id": {
+      "type": "string"
+    },
+    "subject_name": {
+      "type": "string"
+    },
+    "session": {
+      "type": "string"
+    },
+    "term": {
+      "type": "string"
+    },
+    "ca": {
+      "type": "number",
+      "default": 0
+    },
+    "assignment_score": {
+      "type": "number",
+      "default": 0
+    },
+    "test": {
+      "type": "number",
+      "default": 0
+    },
+    "exam": {
+      "type": "number",
+      "default": 0
+    },
+    "total": {
+      "type": "number",
+      "default": 0
+    },
+    "grade": {
+      "type": "string"
+    },
+    "position": {
+      "type": "number"
+    },
+    "class_size": {
+      "type": "number"
+    },
+    "teacher_email": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "submitted",
+        "approved",
+        "published",
+        "correction"
+      ],
+      "default": "submitted"
+    },
+    "form_comment": {
+      "type": "string"
+    },
+    "principal_comment": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "student_id",
+    "subject_id",
+    "session",
+    "term"
+  ],
+  "rls": {
+    "read": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "teacher"
+          }
+        },
+        {
+          "$and": [
+            {
+              "data.status": "published"
+            },
+            {
+              "$or": [
+                {
+                  "data.student_email": "{{user.email}}"
+                },
+                {
+                  "data.guardian_email": "{{user.email}}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "teacher"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "teacher"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        }
+      ]
+    }
+  }
+}

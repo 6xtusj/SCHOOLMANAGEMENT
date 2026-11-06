@@ -1,0 +1,82 @@
+{
+  "name": "Notice",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "body": {
+      "type": "string"
+    },
+    "audience": {
+      "type": "string",
+      "enum": [
+        "all",
+        "staff",
+        "students",
+        "parents"
+      ],
+      "default": "all"
+    },
+    "author": {
+      "type": "string"
+    },
+    "published_on": {
+      "type": "string",
+      "format": "date"
+    }
+  },
+  "required": [
+    "title"
+  ],
+  "rls": {
+    "read": {},
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "teacher"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        }
+      ]
+    }
+  }
+}

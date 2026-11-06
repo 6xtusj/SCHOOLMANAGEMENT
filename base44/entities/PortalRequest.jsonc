@@ -1,0 +1,129 @@
+{
+  "name": "PortalRequest",
+  "type": "object",
+  "properties": {
+    "student_id": {
+      "type": "string"
+    },
+    "student_name": {
+      "type": "string"
+    },
+    "student_email": {
+      "type": "string"
+    },
+    "guardian_email": {
+      "type": "string"
+    },
+    "raised_by": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "transcript",
+        "certificate",
+        "fee",
+        "library",
+        "academic",
+        "other"
+      ],
+      "default": "other"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "in_progress",
+        "resolved",
+        "rejected"
+      ],
+      "default": "pending"
+    },
+    "response": {
+      "type": "string"
+    },
+    "handled_by": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "subject"
+  ],
+  "rls": {
+    "read": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        },
+        {
+          "data.student_email": "{{user.email}}"
+        },
+        {
+          "data.guardian_email": "{{user.email}}"
+        }
+      ]
+    },
+    "create": {},
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        }
+      ]
+    }
+  }
+}

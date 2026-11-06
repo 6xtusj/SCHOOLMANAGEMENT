@@ -1,0 +1,117 @@
+{
+  "name": "StaffProfile",
+  "type": "object",
+  "properties": {
+    "full_name": {
+      "type": "string"
+    },
+    "email": {
+      "type": "string"
+    },
+    "phone": {
+      "type": "string"
+    },
+    "gender": {
+      "type": "string",
+      "enum": [
+        "Male",
+        "Female"
+      ]
+    },
+    "date_of_birth": {
+      "type": "string",
+      "format": "date"
+    },
+    "nationality": {
+      "type": "string"
+    },
+    "address": {
+      "type": "string"
+    },
+    "photo_url": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "teacher",
+        "principal",
+        "bursar",
+        "librarian"
+      ],
+      "default": "teacher"
+    },
+    "active": {
+      "type": "boolean",
+      "default": true
+    },
+    "employment_date": {
+      "type": "string",
+      "format": "date"
+    }
+  },
+  "required": [
+    "full_name"
+  ],
+  "rls": {
+    "read": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "teacher"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        },
+        {
+          "data.email": "{{user.email}}"
+        }
+      ]
+    },
+    "create": {
+      "user_condition": {
+        "role": "admin"
+      }
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "data.email": "{{user.email}}"
+        }
+      ]
+    },
+    "delete": {
+      "user_condition": {
+        "role": "admin"
+      }
+    }
+  }
+}

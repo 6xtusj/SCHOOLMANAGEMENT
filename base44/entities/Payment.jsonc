@@ -1,0 +1,145 @@
+{
+  "name": "Payment",
+  "type": "object",
+  "properties": {
+    "student_id": {
+      "type": "string"
+    },
+    "student_name": {
+      "type": "string"
+    },
+    "student_email": {
+      "type": "string"
+    },
+    "guardian_email": {
+      "type": "string"
+    },
+    "admission_no": {
+      "type": "string"
+    },
+    "class_arm_name": {
+      "type": "string"
+    },
+    "fee_id": { "type": "string" },
+    "fee_name": { "type": "string" },
+    "fee_category": { "type": "string" },
+    "amount": {
+      "type": "number",
+      "default": 0
+    },
+    "method": {
+      "type": "string",
+      "enum": [
+        "Cash",
+        "Transfer",
+        "POS",
+        "Cheque",
+        "Paystack online"
+      ],
+      "default": "Cash"
+    },
+    "reference": {
+      "type": "string"
+    },
+    "session": {
+      "type": "string"
+    },
+    "term": {
+      "type": "string"
+    },
+    "paid_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "payment",
+        "refund",
+        "reversal",
+        "credit"
+      ],
+      "default": "payment"
+    },
+    "receipt_no": {
+      "type": "string"
+    },
+    "note": {
+      "type": "string"
+    },
+    "recorded_by": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "student_id",
+    "amount",
+    "session",
+    "term"
+  ],
+  "rls": {
+    "read": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        },
+        {
+          "data.student_email": "{{user.email}}"
+        },
+        {
+          "data.guardian_email": "{{user.email}}"
+        }
+      ]
+    },
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "user_condition": {
+        "role": "admin"
+      }
+    }
+  }
+}

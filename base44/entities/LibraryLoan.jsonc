@@ -1,0 +1,133 @@
+{
+  "name": "LibraryLoan",
+  "type": "object",
+  "properties": {
+    "book_id": {
+      "type": "string"
+    },
+    "book_title": {
+      "type": "string"
+    },
+    "member_email": {
+      "type": "string"
+    },
+    "member_name": {
+      "type": "string"
+    },
+    "guardian_email": {
+      "type": "string"
+    },
+    "member_type": {
+      "type": "string",
+      "enum": [
+        "student",
+        "staff"
+      ],
+      "default": "student"
+    },
+    "class_arm_name": {
+      "type": "string"
+    },
+    "issued_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "due_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "returned_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "issued",
+        "returned"
+      ],
+      "default": "issued"
+    },
+    "note": {
+      "type": "string"
+    },
+    "recorded_by": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "book_id",
+    "member_email",
+    "issued_on",
+    "due_on"
+  ],
+  "rls": {
+    "read": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        },
+        {
+          "data.member_email": "{{user.email}}"
+        },
+        {
+          "data.guardian_email": "{{user.email}}"
+        }
+      ]
+    },
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    }
+  }
+}

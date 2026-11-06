@@ -1,0 +1,21 @@
+.venv/
+venv/
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+uploads/**
+!uploads/.gitkeep
+backups/
+.vscode/
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.log
+School Management.zip

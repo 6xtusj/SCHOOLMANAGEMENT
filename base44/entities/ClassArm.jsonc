@@ -1,0 +1,48 @@
+{
+  "name": "ClassArm",
+  "type": "object",
+  "properties": {
+    "level": {
+      "type": "string"
+    },
+    "arm": {
+      "type": "string"
+    },
+    "track": {
+      "type": "string"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "order": {
+      "type": "number"
+    },
+    "active": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "required": [
+    "level",
+    "arm",
+    "display_name"
+  ],
+  "rls": {
+    "read": {},
+    "create": {
+      "user_condition": {
+        "role": "admin"
+      }
+    },
+    "update": {
+      "user_condition": {
+        "role": "admin"
+      }
+    },
+    "delete": {
+      "user_condition": {
+        "role": "admin"
+      }
+    }
+  }
+}

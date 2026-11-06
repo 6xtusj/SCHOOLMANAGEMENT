@@ -1,0 +1,94 @@
+{
+  "name": "PortalProfile",
+  "type": "object",
+  "properties": {
+    "email": {
+      "type": "string"
+    },
+    "full_name": {
+      "type": "string"
+    },
+    "phone": {
+      "type": "string"
+    },
+    "gender": {
+      "type": "string",
+      "enum": [
+        "Male",
+        "Female"
+      ]
+    },
+    "date_of_birth": {
+      "type": "string",
+      "format": "date"
+    },
+    "nationality": {
+      "type": "string"
+    },
+    "address": {
+      "type": "string"
+    },
+    "photo_url": {
+      "type": "string"
+    },
+    "notify_email": {
+      "type": "boolean",
+      "default": true
+    },
+    "notify_sms": {
+      "type": "boolean",
+      "default": false
+    },
+    "notify_results": {
+      "type": "boolean",
+      "default": true
+    },
+    "notify_fees": {
+      "type": "boolean",
+      "default": true
+    },
+    "notify_notices": {
+      "type": "boolean",
+      "default": true
+    },
+    "notify_library": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "required": [
+    "email"
+  ],
+  "rls": {
+    "read": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "data.email": "{{user.email}}"
+        }
+      ]
+    },
+    "create": {},
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "data.email": "{{user.email}}"
+        }
+      ]
+    },
+    "delete": {
+      "user_condition": {
+        "role": "admin"
+      }
+    }
+  }
+}

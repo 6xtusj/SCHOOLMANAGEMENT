@@ -1,0 +1,20 @@
+{
+  "name": "FeeItem",
+  "type": "object",
+  "properties": {
+    "name": { "type": "string" },
+    "level": { "type": "string" },
+    "track": { "type": "string" },
+    "amount": { "type": "number" },
+    "session": { "type": "string" },
+    "term": { "type": "string" },
+    "category": { "type": "string", "enum": ["school_fee", "other_fee"], "default": "school_fee" },
+    "installments_allowed": { "type": "boolean", "default": false },
+    "pay_once_per_term": { "type": "boolean", "default": false },
+    "deadline": { "type": "string" },
+    "penalty_type": { "type": "string", "enum": ["none", "extra_fee", "withhold_results"], "default": "none" },
+    "penalty_amount": { "type": "number", "default": 0 }
+  },
+  "required": ["name", "amount"],
+  "description": "Fee schedule item used by the original finance screens."
+}

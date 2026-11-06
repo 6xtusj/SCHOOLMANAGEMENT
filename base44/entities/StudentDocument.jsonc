@@ -1,0 +1,141 @@
+{
+  "name": "StudentDocument",
+  "type": "object",
+  "properties": {
+    "student_id": {
+      "type": "string"
+    },
+    "student_name": {
+      "type": "string"
+    },
+    "student_email": {
+      "type": "string"
+    },
+    "guardian_email": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "certificate",
+        "report",
+        "receipt",
+        "letter",
+        "medical",
+        "other"
+      ],
+      "default": "other"
+    },
+    "file_uri": {
+      "type": "string"
+    },
+    "file_name": {
+      "type": "string"
+    },
+    "uploaded_by": {
+      "type": "string"
+    },
+    "class_arm_id": {
+      "type": "string"
+    },
+    "class_arm_name": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "title"
+  ],
+  "rls": {
+    "read": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "teacher"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        },
+        {
+          "data.student_email": "{{user.email}}"
+        },
+        {
+          "data.guardian_email": "{{user.email}}"
+        }
+      ]
+    },
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "teacher"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        },
+        {
+          "data.student_email": "{{user.email}}"
+        },
+        {
+          "data.guardian_email": "{{user.email}}"
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        }
+      ]
+    }
+  }
+}

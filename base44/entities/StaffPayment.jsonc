@@ -1,0 +1,132 @@
+{
+  "name": "StaffPayment",
+  "type": "object",
+  "properties": {
+    "staff_email": {
+      "type": "string"
+    },
+    "staff_name": {
+      "type": "string"
+    },
+    "staff_role": {
+      "type": "string"
+    },
+    "amount": {
+      "type": "number",
+      "default": 0
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "salary",
+        "allowance",
+        "bonus",
+        "deduction"
+      ],
+      "default": "salary"
+    },
+    "period": {
+      "type": "string"
+    },
+    "method": {
+      "type": "string",
+      "enum": [
+        "Transfer",
+        "Cash",
+        "Cheque"
+      ],
+      "default": "Transfer"
+    },
+    "reference": {
+      "type": "string"
+    },
+    "paid_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "note": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "paid"
+      ],
+      "default": "paid"
+    },
+    "recorded_by": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "staff_email",
+    "amount"
+  ],
+  "rls": {
+    "read": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        },
+        {
+          "data.staff_email": "{{user.email}}"
+        }
+      ]
+    },
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        }
+      ]
+    }
+  }
+}

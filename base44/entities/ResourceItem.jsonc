@@ -1,0 +1,118 @@
+{
+  "name": "ResourceItem",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "author": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "book",
+        "syllabus",
+        "exam"
+      ],
+      "default": "book"
+    },
+    "subject_name": {
+      "type": "string"
+    },
+    "level": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "file_uri": {
+      "type": "string"
+    },
+    "file_name": {
+      "type": "string"
+    },
+    "uploaded_by": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "approved", "rejected"],
+      "default": "approved"
+    },
+    "class_arm_id": {
+      "type": "string"
+    },
+    "subject_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "title"
+  ],
+  "rls": {
+    "read": {},
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "teacher"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        }
+      ]
+    }
+  }
+}

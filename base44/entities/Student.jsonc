@@ -1,0 +1,153 @@
+{
+  "name": "Student",
+  "type": "object",
+  "properties": {
+    "admission_no": {
+      "type": "string"
+    },
+    "full_name": {
+      "type": "string"
+    },
+    "gender": {
+      "type": "string",
+      "enum": [
+        "Male",
+        "Female"
+      ]
+    },
+    "date_of_birth": {
+      "type": "string",
+      "format": "date"
+    },
+    "admission_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "nationality": {
+      "type": "string"
+    },
+    "phone": {
+      "type": "string"
+    },
+    "photo_url": {
+      "type": "string"
+    },
+    "level": {
+      "type": "string"
+    },
+    "class_arm_id": {
+      "type": "string"
+    },
+    "class_arm_name": {
+      "type": "string"
+    },
+    "track": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "Active",
+        "Graduated",
+        "Withdrawn",
+        "Suspended"
+      ],
+      "default": "Active"
+    },
+    "guardian_name": {
+      "type": "string"
+    },
+    "guardian_phone": {
+      "type": "string"
+    },
+    "guardian_email": {
+      "type": "string"
+    },
+    "user_email": {
+      "type": "string"
+    },
+    "address": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "full_name",
+    "level"
+  ],
+  "rls": {
+    "read": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "teacher"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "bursar"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "librarian"
+          }
+        },
+        {
+          "data.user_email": "{{user.email}}"
+        },
+        {
+          "data.guardian_email": "{{user.email}}"
+        }
+      ]
+    },
+    "create": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        },
+        {
+          "user_condition": {
+            "role": "principal"
+          }
+        },
+        {
+          "data.user_email": "{{user.email}}"
+        },
+        {
+          "data.guardian_email": "{{user.email}}"
+        }
+      ]
+    },
+    "delete": {
+      "user_condition": {
+        "role": "admin"
+      }
+    }
+  }
+}
