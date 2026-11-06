@@ -16,6 +16,26 @@ For a Render test deployment:
 
 Keep an independent backup of the host's persistent volume. A persistent volume is not a backup, and the current SQLite deployment is for controlled testing rather than a multi-instance/high-availability production rollout. GitHub Actions runs the backend tests, frontend lint, and Vite build on pushes and pull requests. See [Render Blueprint configuration](https://render.com/docs/blueprint-spec) and [persistent disk limitations](https://render.com/docs/disks).
 
+### Oracle Cloud Always Free VM
+
+The project also includes a Docker Compose deployment for an Oracle Cloud Infrastructure (OCI) Ubuntu VM. It runs the app and Caddy reverse proxy together, stores SQLite/uploads and Caddy's HTTPS certificates in Docker volumes, and obtains HTTPS certificates automatically for your domain. Oracle's Free Tier capacity, eligibility and pricing can change; confirm the selected VM, boot volume, public IP and any other resources are eligible for your account before creating them. Do not rely on free-tier eligibility as a substitute for checking your OCI billing and setting a budget alert.
+
+1. In OCI, create an Ubuntu 22.04 or 24.04 VM. An Ampere A1 VM uses ARM64; the included Docker build is multi-architecture and builds on the VM. Capacity may be unavailable in some regions. Assign a public IPv4 address and use an SSH key. Allow inbound TCP ports 80 and 443 in the VM's subnet security list or attached Network Security Group. Keep SSH (port 22) restricted to your own IP; do not open the app's internal port 10000.
+2. Register or use a domain you control and create an `A` record for the exact hostname you will put in `DOMAIN`, pointing to the VM's public IPv4 address. Caddy needs the domain to resolve publicly and ports 80/443 reachable to issue and renew HTTPS certificates. Wait for DNS to resolve before starting the deployment.
+3. SSH into the VM. Install Git, Docker Engine and the Docker Compose plugin by following Docker's official Ubuntu installation guide: https://docs.docker.com/engine/install/ubuntu/. Do not install Docker using an unverified script.
+4. Clone this repository, then from its project directory copy `deployment/oracle/app.env.example` to `.env`. Edit `.env` with your domain, a unique admin email, and a unique password of at least 16 characters. Generate `SECRET_KEY` with `openssl rand -hex 32`. Protect the file with `chmod 600 .env`; never commit it or share the values. The SMTP and Paystack entries are optional; add real provider credentials only if you intend to test those integrations.
+5. From the project directory, start the services:
+
+   ```sh
+   docker compose --project-directory . -f deployment/oracle/docker-compose.yml up -d --build
+   ```
+
+   The first frontend and backend image build can take several minutes. Check progress with `docker compose --project-directory . -f deployment/oracle/docker-compose.yml logs -f app caddy`. Open `https://YOUR_DOMAIN` after Caddy reports that it has obtained a certificate. Confirm `https://YOUR_DOMAIN/healthz` returns `{"status":"ok"}`.
+6. Sign in with the first admin credentials. After verifying that account works, remove `INITIAL_ADMIN_PASSWORD` (and `INITIAL_ADMIN_EMAIL` if you no longer need it) from `.env`, then recreate the app container with `docker compose --project-directory . -f deployment/oracle/docker-compose.yml up -d --force-recreate app`. Set the public application URL to `https://YOUR_DOMAIN` in Admin → School Settings if the app asks for it; the deployment also supplies it as `PUBLIC_BASE_URL`.
+7. Test only with demo data first. Use Docker Compose to update the app after pushing changes: `git pull` followed by the same `up -d --build` command. The named `school_data` volume is persistent across container rebuilds, but it is not a backup. Back up the database and uploads off the VM and test restoring them before relying on this deployment.
+
+Use the OCI Console's network security rules as well as the VM firewall if enabled. Only Caddy's web ports 80/443 are published; the Flask/Gunicorn port is private to the Compose network. Keep the OS and Docker images patched, restrict SSH, and do not enter real student data until security, backups, privacy requirements and recovery have been reviewed. This single-VM SQLite setup is for testing and limited evaluation, not high-availability production.
+
 ## Windows installation
 
 Requirements: Python 3.10+ and Node.js 20.19+ (or a current Node LTS release).

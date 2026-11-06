@@ -1,0 +1,53 @@
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      HOST: 0.0.0.0
+      PORT: "10000"
+      SCHOOL_DB_PATH: /var/data/school.db
+      UPLOAD_DIR: /var/data/uploads
+      PUBLIC_BASE_URL: https://${DOMAIN:?Set DOMAIN in the project .env file}
+    volumes:
+      - school_data:/var/data
+    expose:
+      - "10000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:10000/healthz', timeout=5)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    init: true
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in the project .env file}
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  school_data:
+  caddy_data:
+  caddy_config:

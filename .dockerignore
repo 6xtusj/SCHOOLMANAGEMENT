@@ -16,3 +16,4 @@ uploads
 backups
 tests
 School Management.zip
+deployment/oracle/app.env.example
