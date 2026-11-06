@@ -36,6 +36,20 @@ The project also includes a Docker Compose deployment for an Oracle Cloud Infras
 
 Use the OCI Console's network security rules as well as the VM firewall if enabled. Only Caddy's web ports 80/443 are published; the Flask/Gunicorn port is private to the Compose network. Keep the OS and Docker images patched, restrict SSH, and do not enter real student data until security, backups, privacy requirements and recovery have been reviewed. This single-VM SQLite setup is for testing and limited evaluation, not high-availability production.
 
+### Netlify free frontend with the Oracle backend
+
+Netlify's Free plan can host this app's built React frontend, but it cannot replace the Flask backend, SQLite database, or file storage. Keep the Oracle VM running as the backend and use a public HTTPS hostname for its Caddy endpoint. Netlify's free plan has usage limits/credits that can change; check the current [Netlify pricing](https://www.netlify.com/pricing/) before publishing.
+
+The Netlify build creates same-site proxy rewrites for `/api/*` and `/uploads/*`, then falls back to the React app for page routes. This preserves the app's relative API URLs, login session cookies, API requests, and uploaded images without adding cross-origin browser access. Netlify proxy requests have a 26-second timeout, so slow operations may fail.
+
+1. Deploy the Oracle backend first using the preceding instructions. Its `DOMAIN` is the backend hostname (for example `api.school.example.com`) whose DNS points to the Oracle VM.
+2. In Netlify, import this GitHub repository as a new site. Netlify reads `netlify.toml` for the publish directory (`dist`) and build command (`npm run build:netlify`).
+3. Before deploying, add the environment variable `NETLIFY_API_ORIGIN` in the Netlify site settings. Set it to the Oracle backend's HTTPS origin only, such as `https://api.school.example.com` (no path or trailing route). Trigger a new deploy so the build generates the proxy rules.
+4. Open the Netlify site's Deploy log and confirm the build succeeds. Visit the Netlify URL and test login, API-backed pages, a small upload, and `/healthz`. Netlify must proxy `/healthz` too only if you need that check on the Netlify hostname; the current rules intentionally proxy only API and uploads, so check health on the Oracle hostname.
+5. To have email links open the Netlify frontend, set `PUBLIC_BASE_URL=https://YOUR_SITE.netlify.app` in the Oracle project's `.env` (or use your custom domain assigned to Netlify). Then recreate the backend app container with `docker compose --project-directory . -f deployment/oracle/docker-compose.yml up -d --force-recreate app`. Otherwise links use the Oracle backend URL, which also serves the app directly.
+
+Do not publish the backend secret variables to Netlify; only `NETLIFY_API_ORIGIN` belongs in the Netlify build environment. Keep `SECRET_KEY`, SMTP credentials, and Paystack secrets only on the Oracle VM. Netlify hosts the user interface, not the database or backups.
+
 ## Windows installation
 
 Requirements: Python 3.10+ and Node.js 20.19+ (or a current Node LTS release).
