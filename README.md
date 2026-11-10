@@ -4,7 +4,7 @@ This package keeps the supplied React/Vite application as its frontend and repla
 
 ## GitHub and online hosting
 
-GitHub is suitable for storing this source code and running the included automated checks; **GitHub Pages cannot host this complete application** because it needs a live Flask API, authentication, and a writable database. Use a Docker-capable application host for the full system. The included `Dockerfile` builds the React frontend and serves it with Flask/Gunicorn.
+GitHub is suitable for storing this source code and running the included automated checks; **GitHub Pages cannot host this complete application** because it needs a live Flask API, authentication, and a writable database. The repository runs tests, lint, and build checks on GitHub Actions; deployment is handled by Render, not a GitHub Pages workflow. Use a Docker-capable application host for the full system. The included `Dockerfile` builds the React frontend and serves it with Flask/Gunicorn.
 
 For a Render test deployment:
 
