@@ -75,12 +75,16 @@ export default function ResetPassword() {
               autoComplete="new-password"
               autoFocus
               placeholder="••••••••"
+              minLength={12}
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               className="pl-10 h-12"
               required
             />
           </div>
+          <p className="text-xs text-muted-foreground">
+            Use at least 12 characters with uppercase and lowercase letters, a number, and a symbol.
+          </p>
         </div>
         <div className="space-y-2">
           <Label htmlFor="confirm">Confirm Password</Label>

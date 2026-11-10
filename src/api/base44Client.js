@@ -1,12 +1,32 @@
 // Local compatibility adapter: keeps the original React pages and their
 // Base44-style entity calls intact while routing all data through Flask.
 const API = '/api';
+let csrfToken = '';
+function readCsrfCookie() {
+  const prefix = 'school_csrf_token=';
+  return document.cookie.split('; ').find((cookie) => cookie.startsWith(prefix))?.slice(prefix.length) || '';
+}
 async function request(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+  let token = readCsrfCookie() || csrfToken;
+  if (unsafe && !token) {
+    const csrfResponse = await fetch(`${API}/security/csrf`, { credentials: 'same-origin' });
+    const csrfData = await csrfResponse.json().catch(() => ({}));
+    if (!csrfResponse.ok || !csrfData.csrf_token) throw new Error('Unable to establish a secure session. Refresh the page and try again.');
+    token = csrfData.csrf_token;
+    csrfToken = token;
+  }
   const response = await fetch(`${API}${path}`, {
     credentials: 'same-origin',
     ...options,
-    headers: { ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...(options.headers || {}) },
+    headers: {
+      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(unsafe ? { 'X-CSRF-Token': token } : {}),
+      ...(options.headers || {}),
+    },
   });
+  csrfToken = response.headers.get('X-CSRF-Token') || csrfToken;
   const data = response.status === 204 ? null : await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 && !path.startsWith('/auth/')) {

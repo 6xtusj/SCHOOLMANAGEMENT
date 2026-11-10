@@ -1,9 +1,11 @@
 from __future__ import annotations
 import base64, html
-import json, mimetypes, os, re, secrets, sqlite3, uuid, smtplib, urllib.request, urllib.error, hmac
+import json, mimetypes, os, re, secrets, uuid, smtplib, urllib.request, urllib.error, hmac
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
+import io
+import zipfile
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from email.message import EmailMessage
@@ -12,7 +14,9 @@ from hashlib import sha256
 from base64 import urlsafe_b64encode
 from cryptography.fernet import Fernet, InvalidToken
 from urllib.parse import quote, urlencode, urlsplit
-from flask import Flask, jsonify, request, session, send_from_directory, abort, has_request_context
+from flask import Flask, jsonify, request, session, send_file, send_from_directory, abort, has_request_context
+from PIL import Image, UnidentifiedImageError
+from storage import FileStorage, StorageError
 
 ROOT = Path(__file__).resolve().parent
 try:
@@ -20,10 +24,13 @@ try:
     load_dotenv(ROOT / '.env')
 except ImportError:
     pass
+from database import connect as connect_database, database_errors, integrity_errors, uses_postgres
+
 DB_PATH = Path(os.environ.get('SCHOOL_DB_PATH', ROOT / 'school.db'))
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', ROOT / 'uploads'))
 SCHEMA_DIR = ROOT / 'base44' / 'entities'
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+file_storage = FileStorage(UPLOAD_DIR)
 app = Flask(__name__, static_folder=None)
 app.config.update(SECRET_KEY=os.environ.get('SECRET_KEY', 'change-this-school-secret-before-deployment'), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=(os.environ.get('COOKIE_SECURE', 'false').lower() == 'true' or os.environ.get('APP_ENV', 'development').lower() == 'production'), PERMANENT_SESSION_LIFETIME=timedelta(hours=8), MAX_CONTENT_LENGTH=10 * 1024 * 1024)
 _configured_secret = os.environ.get('SECRET_KEY', '').strip()
@@ -31,21 +38,138 @@ if os.environ.get('APP_ENV', 'development').lower() == 'production' and (len(_co
     raise RuntimeError('Production startup refused: set a unique, random SECRET_KEY of at least 32 characters in the environment.')
 
 
-class ClosingSQLiteConnection(sqlite3.Connection):
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
+@app.before_request
+def enforce_csrf():
+    if not request.path.startswith('/api/') or request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return None
+    if request.endpoint == 'paystack_webhook':
+        return None
+    expected=session.get('_csrf_token')
+    supplied=request.headers.get('X-CSRF-Token', '')
+    if expected and supplied and hmac.compare_digest(str(expected), supplied):
+        return None
+    origin=request.headers.get('Origin')
+    if not origin:
+        referer=request.headers.get('Referer')
+        origin=f'{urlsplit(referer).scheme}://{urlsplit(referer).netloc}' if referer else ''
+    allowed_origins={item.strip().rstrip('/') for item in os.environ.get('CORS_ALLOWED_ORIGINS','').split(',') if item.strip()}
+    parsed=urlsplit(origin) if origin else None
+    same_host=bool(parsed and parsed.scheme in ('http','https') and parsed.hostname and parsed.hostname.lower()==request.host.split(':')[0].lower())
+    development_host_match=(
+        os.environ.get('APP_ENV','development').lower()!='production'
+        and parsed and parsed.hostname and parsed.hostname.lower() in ('localhost','127.0.0.1')
+        and request.host.split(':')[0].lower() in ('localhost','127.0.0.1')
+    )
+    if origin.rstrip('/') not in allowed_origins and not same_host and not development_host_match:
+        return jsonify(error='Your session security token is missing or the request origin is not trusted.'), 403
+    return None
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+    response.headers.setdefault('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+    if os.environ.get('APP_ENV', 'development').lower() == 'production':
+        response.headers.setdefault('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+    origin=request.headers.get('Origin')
+    allowed_origins={item.strip().rstrip('/') for item in os.environ.get('CORS_ALLOWED_ORIGINS','').split(',') if item.strip()}
+    if origin and origin.rstrip('/') in allowed_origins:
+        response.headers['Access-Control-Allow-Origin']=origin
+        response.headers['Access-Control-Allow-Credentials']='true'
+        response.headers['Access-Control-Allow-Headers']='Content-Type, X-CSRF-Token'
+        response.headers['Access-Control-Allow-Methods']='GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS'
+        response.headers['Access-Control-Expose-Headers']='X-CSRF-Token'
+        response.headers.add('Vary','Origin')
+    if request.path.startswith('/api/'):
+        token=session.get('_csrf_token')
+        if not token:
+            token=secrets.token_urlsafe(32)
+            session['_csrf_token']=token
+        response.headers['X-CSRF-Token']=token
+        response.set_cookie(
+            'school_csrf_token',
+            token,
+            httponly=False,
+            secure=app.config['SESSION_COOKIE_SECURE'],
+            samesite='Lax',
+            max_age=int(app.permanent_session_lifetime.total_seconds()),
+            path='/',
+        )
+    return response
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH, factory=ClosingSQLiteConnection)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return connect_database(DB_PATH)
 
 
 def now(): return datetime.now(timezone.utc).isoformat()
+
+
+def password_policy_error(password):
+    if len(password) < 12:
+        return 'Password must be at least 12 characters long.'
+    if not any(char.islower() for char in password) or not any(char.isupper() for char in password):
+        return 'Password must contain both uppercase and lowercase letters.'
+    if not any(char.isdigit() for char in password) or not any(not char.isalnum() for char in password):
+        return 'Password must contain a number and a symbol.'
+    return None
+
+
+def upload_content_matches(upload, extension):
+    stream=upload.stream
+    content=stream.read()
+    stream.seek(0)
+    if not content:
+        return False
+    if extension in ('.jpg','.jpeg','.png','.gif','.webp'):
+        try:
+            with Image.open(io.BytesIO(content)) as image:
+                expected_format={'.jpg':'JPEG','.jpeg':'JPEG','.png':'PNG','.gif':'GIF','.webp':'WEBP'}[extension]
+                if image.format != expected_format or image.width*image.height>25_000_000:
+                    return False
+                image.verify()
+                return True
+        except (OSError,UnidentifiedImageError,Image.DecompressionBombError):
+            return False
+    if extension == '.pdf':
+        return b'%PDF-' in content[:1024]
+    if extension in ('.doc','.xls','.ppt'):
+        return content.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1')
+    if extension in ('.docx','.xlsx','.pptx','.odt'):
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                names=set(archive.namelist())
+                if '[Content_Types].xml' not in names and extension != '.odt':
+                    return False
+                required={
+                    '.docx':'word/document.xml',
+                    '.xlsx':'xl/workbook.xml',
+                    '.pptx':'ppt/presentation.xml',
+                }
+                if extension in required:
+                    return required[extension] in names
+                info=archive.getinfo('mimetype')
+                return info.file_size<=128 and archive.read('mimetype')==b'application/vnd.oasis.opendocument.text'
+        except (KeyError, OSError, zipfile.BadZipFile, zipfile.LargeZipFile):
+            return False
+    if extension in ('.txt','.csv'):
+        try:
+            content.decode('utf-8-sig')
+            return b'\x00' not in content
+        except UnicodeDecodeError:
+            return False
+    return False
+
+
+def persist_uploaded_file(upload, filename, content_type):
+    try:
+        file_storage.save_file(upload,filename,content_type)
+    except StorageError:
+        app.logger.exception('Uploaded file could not be stored.')
+        return jsonify(error='File storage is temporarily unavailable.'),503
+    return None
 
 
 EMAIL_SECRET_FIELDS = (
@@ -260,16 +384,25 @@ def branded_email_message(to_email, subject, body, branding=None, sender=None, a
     cfg = branding or smtp_config()
     school_name = cfg.get('SCHOOL_NAME') or 'Your School'
     logo_uri = cfg.get('SCHOOL_LOGO') or ''
-    logo_path = None
+    logo_data = None
+    logo_filename = None
+    logo_media_type = None
     if logo_uri.startswith('/uploads/'):
         filename = Path(logo_uri.removeprefix('/uploads/')).name
-        candidate = (UPLOAD_DIR / filename).resolve()
-        if candidate.parent == UPLOAD_DIR.resolve() and candidate.is_file():
-            media_type, _ = mimetypes.guess_type(candidate.name)
+        try:
+            candidate_data=file_storage.read(filename)
+            media_type,_=mimetypes.guess_type(filename)
             if media_type and media_type.startswith('image/'):
-                logo_path = candidate
+                logo_data=candidate_data
+                logo_filename=filename
+                logo_media_type=media_type
 
-    image = '<img src="cid:school-logo" alt="" width="64" height="64" style="display:block;width:64px;height:64px;object-fit:contain;border:0;margin:0 auto 12px">' if logo_path else ''
+        except FileNotFoundError:
+            pass
+        except StorageError:
+            app.logger.exception('School logo could not be read from upload storage.')
+
+    image = '<img src="cid:school-logo" alt="" width="64" height="64" style="display:block;width:64px;height:64px;object-fit:contain;border:0;margin:0 auto 12px">' if logo_data else ''
     contacts = [cfg.get('SCHOOL_ADDRESS'), cfg.get('SCHOOL_PHONE'), cfg.get('SCHOOL_EMAIL')]
     contact_line = ' · '.join(html.escape(str(value)) for value in contacts if value)
     footer_contact = f'<p style="margin:8px 0 0;color:#6b7280;font-size:12px">{contact_line}</p>' if contact_line else ''
@@ -303,12 +436,11 @@ def branded_email_message(to_email, subject, body, branding=None, sender=None, a
     message['To'] = to_email
     message.set_content(str(body or ''))
     message.add_alternative(html_body, subtype='html')
-    if logo_path:
+    if logo_data:
         html_part = message.get_payload()[-1]
-        media_type = mimetypes.guess_type(logo_path.name)[0] or 'image/png'
-        maintype, subtype = media_type.split('/', 1)
-        html_part.add_related(logo_path.read_bytes(), maintype=maintype, subtype=subtype,
-                              cid='<school-logo>', disposition='inline', filename=logo_path.name)
+        maintype, subtype = logo_media_type.split('/', 1)
+        html_part.add_related(logo_data, maintype=maintype, subtype=subtype,
+                              cid='<school-logo>', disposition='inline', filename=logo_filename)
     return message
 
 
@@ -462,7 +594,7 @@ def log_email_delivery(to_email, subject, status, error=None):
                  str(error)[:1000] if error else None, session.get('user_id') if has_request_context() else None, now()),
             )
             c.execute("DELETE FROM email_delivery_logs WHERE created_at < datetime('now','-90 days')")
-    except sqlite3.Error:
+    except database_errors():
         app.logger.exception('Email delivery status could not be recorded')
 
 
@@ -584,7 +716,7 @@ def make_invitation(record_id, email, role):
     expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
     with db() as c:
         c.execute('DELETE FROM invite_tokens WHERE record_id=?', (record_id,))
-        c.execute('INSERT INTO invite_tokens(token,record_id,email,expires_at,created_at) VALUES(?,?,?,?,?)', (token,record_id,email,expires,now()))
+        c.execute('INSERT INTO invite_tokens(token,record_id,email,expires_at,created_at) VALUES(?,?,?,?,?)', (sha256(token.encode()).hexdigest(),record_id,email,expires,now()))
     link = f'{base}/register?invite={token}&email={quote(email)}'
     school_name = smtp_config().get('SCHOOL_NAME') or 'Your School'
     account_type = {'parent': 'Parent/Guardian', 'student': 'Student', 'bursar': 'Bursary', 'principal': 'Principal',
@@ -605,6 +737,11 @@ def make_invitation(record_id, email, role):
 
 def migrate_schema(c):
     """Additive migrations only: preserve existing school records and accounts."""
+    auth_user_columns={row['name'] for row in c.execute('PRAGMA table_info(auth_users)').fetchall()}
+    if 'email_verified' not in auth_user_columns:
+        c.execute('ALTER TABLE auth_users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 1')
+    if 'session_version' not in auth_user_columns:
+        c.execute('ALTER TABLE auth_users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0')
     c.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     c.execute("CREATE TABLE IF NOT EXISTS academic_sessions (id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, starts_on TEXT, ends_on TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL)")
     c.execute("CREATE TABLE IF NOT EXISTS academic_terms (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES academic_sessions(id), name TEXT NOT NULL, starts_on TEXT, ends_on TEXT, resumption_on TEXT, exam_starts_on TEXT, exam_ends_on TEXT, closing_on TEXT, breaks_json TEXT NOT NULL DEFAULT '[]', holidays_json TEXT NOT NULL DEFAULT '[]', is_active INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','open','exams','closing','finished')), created_by TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(session_id,name))")
@@ -688,8 +825,18 @@ def audit(actor, action, target_type=None, target_id=None, details=None):
 def current_user():
     uid = session.get('user_id')
     if not uid: return None
-    with db() as c: row = c.execute('SELECT id,email,full_name,role,account_status,created_date FROM auth_users WHERE id=?', (uid,)).fetchone()
-    return dict(row) if row else None
+    with db() as c:
+        row = c.execute(
+            'SELECT id,email,full_name,role,account_status,created_date,session_version '
+            'FROM auth_users WHERE id=?',
+            (uid,),
+        ).fetchone()
+    if not row or session.get('session_version') != row['session_version']:
+        session.clear()
+        return None
+    user = dict(row)
+    user.pop('session_version', None)
+    return user
 
 
 def is_primary_admin_id(user_id, conn=None):
@@ -700,7 +847,7 @@ def is_primary_admin_id(user_id, conn=None):
     try:
         row = c.execute('SELECT primary_admin_user_id FROM school_security_settings WHERE id=1').fetchone()
         return bool(row and row['primary_admin_user_id'] and str(row['primary_admin_user_id']) == str(user_id))
-    except sqlite3.OperationalError:
+    except database_errors():
         return False
     finally:
         if owns_connection: c.close()
@@ -814,7 +961,7 @@ def academic_session_create():
     sid=str(uuid.uuid4())
     try:
         with db() as c: c.execute('INSERT INTO academic_sessions(id,name,starts_on,ends_on,created_by,created_at) VALUES(?,?,?,?,?,?)',(sid,name,body.get('starts_on'),body.get('ends_on'),current_user()['id'],now()))
-    except sqlite3.IntegrityError: return jsonify(error='That academic session already exists.'),409
+    except integrity_errors(): return jsonify(error='That academic session already exists.'),409
     audit(current_user(),'academic_session_created','academic_session',sid,{'name':name,'starts_on':body.get('starts_on'),'ends_on':body.get('ends_on')})
     return jsonify(id=sid,name=name,starts_on=body.get('starts_on'),ends_on=body.get('ends_on')),201
 
@@ -835,7 +982,7 @@ def academic_term_create(sid):
                 overlap=c.execute("SELECT name FROM academic_terms WHERE session_id=? AND starts_on IS NOT NULL AND ends_on IS NOT NULL AND starts_on<=? AND ends_on>=?",(sid,body['ends_on'],body['starts_on'])).fetchone()
                 if overlap: return jsonify(error=f'This term overlaps with {overlap["name"]}. Adjust the dates so terms do not overlap.'),409
             c.execute('INSERT INTO academic_terms(id,session_id,name,starts_on,ends_on,resumption_on,exam_starts_on,exam_ends_on,closing_on,breaks_json,holidays_json,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(tid,sid,name,body.get('starts_on'),body.get('ends_on'),body.get('resumption_on'),body.get('exam_starts_on'),body.get('exam_ends_on'),body.get('closing_on'),json.dumps(body.get('breaks',[])),json.dumps(body.get('holidays',[])),current_user()['id'],now()))
-    except sqlite3.IntegrityError: return jsonify(error='That term already exists in this session.'),409
+    except integrity_errors(): return jsonify(error='That term already exists in this session.'),409
     audit(current_user(),'academic_term_created','academic_term',tid,{'session_id':sid,'name':name,'starts_on':body.get('starts_on'),'ends_on':body.get('ends_on')})
     return jsonify(id=tid,session_id=sid,name=name,status='planned'),201
 
@@ -1081,7 +1228,7 @@ def optional_subject_select():
         if current_user()['role']=='student' and not term_row['is_active']: return jsonify(error='Students can confirm subject choices only for the active term/session.'),403
         sid=str(uuid.uuid4())
         try: c.execute('INSERT INTO optional_subject_selections(id,student_id,class_key,session_id,term_id,subject_ids_json,requested_at) VALUES(?,?,?,?,?,?,?)',(sid,student_id,class_key,session_id,term_id,json.dumps(subjects),now()))
-        except sqlite3.IntegrityError: return jsonify(error='A selection is already locked for this session.'),409
+        except integrity_errors(): return jsonify(error='A selection is already locked for this session.'),409
     audit(current_user(),'optional_subjects_confirmed','optional_subject_selection',sid,{'subjects':subjects})
     return jsonify(id=sid,status='confirmed',subject_ids=subjects),201
 
@@ -1285,8 +1432,8 @@ def admin_send_test_email():
 
 def init_db():
     with db() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS auth_users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, full_name TEXT DEFAULT "", role TEXT DEFAULT "user", account_status TEXT DEFAULT "active", email_verified INTEGER NOT NULL DEFAULT 1, session_version INTEGER NOT NULL DEFAULT 0, created_date TEXT NOT NULL)')
         migrate_schema(c)
-        c.execute('CREATE TABLE IF NOT EXISTS auth_users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, full_name TEXT DEFAULT "", role TEXT DEFAULT "user", account_status TEXT DEFAULT "active", created_date TEXT NOT NULL)')
         c.execute('CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, entity TEXT NOT NULL, data TEXT NOT NULL, created_date TEXT NOT NULL, updated_date TEXT NOT NULL)')
         c.execute('CREATE TABLE IF NOT EXISTS email_provider_config (id INTEGER PRIMARY KEY CHECK(id=1), config_encrypted TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT)')
         _migrate_legacy_email_settings(c)
@@ -1348,8 +1495,8 @@ def init_db():
         if production and not exists:
             if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', bootstrap_email):
                 raise RuntimeError('Production startup refused: set INITIAL_ADMIN_EMAIL to a valid administrator email for the first run.')
-            if not bootstrap_password or len(bootstrap_password) < 16:
-                raise RuntimeError('Production startup refused: set INITIAL_ADMIN_PASSWORD to a unique password of at least 16 characters for the first run.')
+            if not bootstrap_password or len(bootstrap_password) < 16 or password_policy_error(bootstrap_password):
+                raise RuntimeError('Production startup refused: set INITIAL_ADMIN_PASSWORD to a unique password of at least 16 characters containing uppercase and lowercase letters, a number, and a symbol.')
         if not exists:
             uid = str(uuid.uuid4())
             admin_name = str(os.environ.get('INITIAL_ADMIN_NAME') or 'School Administrator').strip() if production else 'School Administrator'
@@ -1977,8 +2124,11 @@ def public_site_image_upload():
     extension = Path(filename).suffix.lower()
     if extension not in ('.jpg', '.jpeg', '.png', '.webp'):
         return jsonify(error='School photos must be JPG, PNG or WebP images.'), 400
-    stored = f'{uuid.uuid4().hex}_{filename}'
-    upload.save(UPLOAD_DIR / stored)
+    if not upload_content_matches(upload,extension):
+        return jsonify(error='The uploaded photo content does not match its file type.'),400
+    stored = f'{uuid.uuid4().hex}{extension}'
+    storage_error=persist_uploaded_file(upload,stored,mimetypes.guess_type(stored)[0])
+    if storage_error: return storage_error
     return jsonify(file_uri=f'/uploads/{stored}'), 201
 
 
@@ -2191,8 +2341,9 @@ def auth_login():
         valid=bool(row and check_password_hash(row['password_hash'],password))
         c.execute('INSERT INTO login_attempts(email,ip_address,attempted_at,success) VALUES(?,?,?,?)',(email,ip,now(),1 if valid else 0))
     if not valid: return jsonify(error='Invalid email or password.'),401
+    if not row['email_verified']: return jsonify(error='Verify your email address before signing in.'),403
     if row['account_status'] != 'active': return jsonify(error='Your account is not active. Contact the school administrator.'),403
-    session.clear(); session['user_id']=row['id']; session.permanent=True
+    session.clear(); session['user_id']=row['id']; session['session_version']=row['session_version']; session.permanent=True
     return jsonify({'user':current_user()})
 
 @app.get('/api/auth/me')
@@ -2222,7 +2373,9 @@ def auth_logout(): session.clear(); return jsonify(ok=True)
 @app.post('/api/auth/register')
 def auth_register():
     body=request.get_json(silent=True) or {}; email=str(body.get('email','')).strip().lower(); password=str(body.get('password',''))
-    if not email or len(password)<8: return jsonify(error='Enter a valid email and a password of at least 8 characters.'),400
+    policy_error=password_policy_error(password)
+    if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+',email): return jsonify(error='Enter a valid email address.'),400
+    if policy_error: return jsonify(error=policy_error),400
     invite_token=str(body.get('invite_token','')).strip()
     with db() as c:
         if c.execute('SELECT id FROM auth_users WHERE lower(email)=?',(email,)).fetchone(): return jsonify(error='An account with this email already exists.'),409
@@ -2235,12 +2388,13 @@ def auth_register():
         if str(role).lower() == 'admin' and not (invited_record and is_primary_admin_email(email, c)):
             return jsonify(error='Admin accounts cannot be registered or activated through invitations. Use the Principal-controlled Admin handover process.'),403
         if invite_token:
-            token_row=c.execute('SELECT record_id,email,expires_at FROM invite_tokens WHERE token=?',(invite_token,)).fetchone()
+            token_hash=sha256(invite_token.encode()).hexdigest()
+            token_row=c.execute('SELECT token,record_id,email,expires_at FROM invite_tokens WHERE token IN (?,?)',(token_hash,invite_token)).fetchone()
             if not token_row or token_row['expires_at'] < now() or token_row['email'].lower()!=email or not invited_record or token_row['record_id']!=invited_record[0]:
                 return jsonify(error='This invitation link is invalid or has expired. Ask the school to resend it.'),400
-            c.execute('DELETE FROM invite_tokens WHERE token=?',(invite_token,))
+            c.execute('DELETE FROM invite_tokens WHERE token=?',(token_row['token'],))
         uid=str(uuid.uuid4()); stamp=now()
-        c.execute('INSERT INTO auth_users(id,email,password_hash,role,account_status,created_date) VALUES(?,?,?,?,?,?)',(uid,email,generate_password_hash(password),role,account_status,stamp))
+        c.execute('INSERT INTO auth_users(id,email,password_hash,role,account_status,email_verified,created_date) VALUES(?,?,?,?,?,?,?)',(uid,email,generate_password_hash(password),role,account_status,0,stamp))
         if invited_record:
             rid,d=invited_record; d['role']=role; d['account_status']=account_status
             c.execute('UPDATE records SET data=?,updated_date=? WHERE id=?',(json.dumps(d),stamp,rid))
@@ -2254,10 +2408,15 @@ def auth_register():
                            f'Use this verification code to confirm your email address for the {school_name} school portal:\n\n'
                            f'{code}\n\nThis code expires in 15 minutes. Do not share it with anyone.\n\n'
                            'If you did not create this account, contact the school office.\n\nKind regards,\nThe School Administration')
-    if not sent:
-        code='123456'; error=error or 'Email could not be delivered.'
-    with db() as c: c.execute('INSERT OR REPLACE INTO verification_codes(email,code,expires_at) VALUES(?,?,?)',(email,code,expires))
-    return jsonify(ok=True, message='Account created. Verify your email to continue.', email_sent=sent, email_error=error, local_verification_code=None if sent else '123456'),201
+    local_code = not sent and os.environ.get('APP_ENV', 'development').lower() != 'production'
+    if sent or local_code:
+        with db() as c:
+            c.execute('INSERT OR REPLACE INTO verification_codes(email,code,expires_at) VALUES(?,?,?)',
+                      (email,generate_password_hash(code),expires))
+    else:
+        error=error or 'Email could not be delivered.'
+    return jsonify(ok=True, message='Account created. Verify your email to continue.', email_sent=sent,
+                   email_error=error, local_verification_code=code if local_code else None),201
 
 @app.post('/api/auth/verify')
 def auth_verify():
@@ -2265,13 +2424,19 @@ def auth_verify():
     with db() as c:
         code_row=c.execute('SELECT code,expires_at FROM verification_codes WHERE lower(email)=?',(email,)).fetchone()
         if code_row:
-            if code_row['expires_at'] < now() or not secrets.compare_digest(str(code_row['code']),otp): return jsonify(error='Verification code is invalid or expired.'),400
-            c.execute('DELETE FROM verification_codes WHERE lower(email)=?',(email,))
-        elif otp != '123456': return jsonify(error='Invalid verification code.'),400
-        row=c.execute('SELECT id,account_status FROM auth_users WHERE lower(email)=?',(email,)).fetchone()
+            stored_code=str(code_row['code'])
+            valid_code=(check_password_hash(stored_code,otp) if stored_code.startswith(('scrypt:','pbkdf2:'))
+                        else secrets.compare_digest(stored_code,otp))
+            if code_row['expires_at'] < now() or not valid_code: return jsonify(error='Verification code is invalid or expired.'),400
+            deleted=c.execute('DELETE FROM verification_codes WHERE lower(email)=? AND code=?',(email,code_row['code']))
+            if not deleted.rowcount: return jsonify(error='Verification code is invalid or expired.'),400
+        else: return jsonify(error='Verification code is invalid or expired.'),400
+        c.execute('UPDATE auth_users SET email_verified=1 WHERE lower(email)=?',(email,))
+        row=c.execute('SELECT id,account_status,session_version FROM auth_users WHERE lower(email)=?',(email,)).fetchone()
     if not row: return jsonify(error='Account not found.'),404
     if row['account_status'] != 'active': return jsonify(error='Your account is awaiting administrator approval.'),403
-    session.clear(); session['user_id']=row['id']; return jsonify(access_token='local-session')
+    session.clear(); session['user_id']=row['id']; session['session_version']=row['session_version']; session.permanent=True
+    return jsonify(access_token='local-session')
 
 @app.post('/api/auth/resend')
 def auth_resend():
@@ -2286,9 +2451,12 @@ def auth_resend():
                          f'Dear Portal user,\n\nYour email verification code is:\n\n{code}\n\n'
                          'It expires in 15 minutes. Do not share this code with anyone.\n\n'
                          'If you did not request this code, contact the school office.')
-    if not sent: code='123456'
-    with db() as c: c.execute('INSERT OR REPLACE INTO verification_codes(email,code,expires_at) VALUES(?,?,?)',(email,code,expires))
-    return jsonify(ok=True,email_sent=sent,email_error=error,local_verification_code=None if sent else '123456')
+    local_code = not sent and os.environ.get('APP_ENV', 'development').lower() != 'production'
+    if sent or local_code:
+        with db() as c:
+            c.execute('INSERT OR REPLACE INTO verification_codes(email,code,expires_at) VALUES(?,?,?)',
+                      (email,generate_password_hash(code),expires))
+    return jsonify(ok=True,email_sent=sent,email_error=error,local_verification_code=code if local_code else None)
 
 @app.post('/api/auth/password/request')
 def password_request():
@@ -2300,7 +2468,10 @@ def password_request():
             app.logger.error('Password reset email not sent because the Public application URL is not configured.')
             return jsonify(ok=True)
         token=secrets.token_urlsafe(24)
-        with db() as c: c.execute('INSERT INTO reset_tokens(token,user_id,expires_at) VALUES(?,?,?)',(token,row['id'],(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()))
+        token_hash=sha256(token.encode()).hexdigest()
+        with db() as c:
+            c.execute('DELETE FROM reset_tokens WHERE user_id=?',(row['id'],))
+            c.execute('INSERT INTO reset_tokens(token,user_id,expires_at) VALUES(?,?,?)',(token_hash,row['id'],(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()))
         link=f'{base}/reset-password?token={token}'
         school_name=smtp_config().get('SCHOOL_NAME') or 'Your School'
         sent,error=send_mail(email,f'{school_name} portal password reset',
@@ -2318,12 +2489,17 @@ def password_request():
 
 @app.post('/api/auth/password/reset')
 def password_reset():
-    body=request.get_json(silent=True) or {}; token=body.get('token'); password=str(body.get('password',''))
-    if len(password)<8: return jsonify(error='Password must contain at least 8 characters.'),400
+    body=request.get_json(silent=True) or {}; token=str(body.get('token') or ''); password=str(body.get('password',''))
+    policy_error=password_policy_error(password)
+    if policy_error: return jsonify(error=policy_error),400
     with db() as c:
-        row=c.execute('SELECT user_id,expires_at FROM reset_tokens WHERE token=?',(token,)).fetchone()
+        token_hash=sha256(str(token or '').encode()).hexdigest()
+        row=c.execute('SELECT user_id,expires_at,token FROM reset_tokens WHERE token IN (?,?)',(token_hash,token)).fetchone()
         if not row or row['expires_at'] < now(): return jsonify(error='Reset link is invalid or expired.'),400
-        c.execute('UPDATE auth_users SET password_hash=? WHERE id=?',(generate_password_hash(password),row['user_id'])); c.execute('DELETE FROM reset_tokens WHERE token=?',(token,))
+        claimed=c.execute('DELETE FROM reset_tokens WHERE token=? AND expires_at>=?',(row['token'],now()))
+        if not claimed.rowcount: return jsonify(error='Reset link is invalid or expired.'),400
+        c.execute('UPDATE auth_users SET password_hash=?,session_version=session_version+1 WHERE id=?',(generate_password_hash(password),row['user_id']))
+        c.execute('DELETE FROM reset_tokens WHERE user_id=?',(row['user_id'],))
     return jsonify(ok=True)
 
 @app.get('/api/admin/portal-accounts')
@@ -2739,7 +2915,7 @@ def resend_invitation(rid):
                 return jsonify(ok=False,email_sent=False,invite_url='',email_error='Set the Public application URL in School Settings or PUBLIC_BASE_URL before sending reset links.',mode='password_reset'),503
             token=secrets.token_urlsafe(32); expires=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()
             c.execute('DELETE FROM reset_tokens WHERE user_id=?',(existing['id'],))
-            c.execute('INSERT INTO reset_tokens(token,user_id,expires_at) VALUES(?,?,?)',(token,existing['id'],expires))
+            c.execute('INSERT INTO reset_tokens(token,user_id,expires_at) VALUES(?,?,?)',(sha256(token.encode()).hexdigest(),existing['id'],expires))
             link=f'{base}/reset-password?token={token}'
             school_name=smtp_config().get('SCHOOL_NAME') or 'Your School'
             body=(f'Dear {data.get("full_name") or "Portal user"},\n\n'
@@ -2793,7 +2969,12 @@ def upload_file():
     allowed={'png','jpg','jpeg','gif','webp','pdf','doc','docx','xls','xlsx','ppt','pptx','txt','csv'}
     ext=name.rsplit('.',1)[-1].lower() if '.' in name else ''
     if ext not in allowed: return jsonify(error='Unsupported file type. Allowed: images, PDF, Office documents, TXT and CSV.'),400
-    stored=f'{uuid.uuid4().hex}_{name}'; f.save(UPLOAD_DIR/stored)
+    extension=f'.{ext}'
+    if not upload_content_matches(f,extension):
+        return jsonify(error='The uploaded file content does not match its file type.'),400
+    stored=f'{uuid.uuid4().hex}{extension}'
+    storage_error=persist_uploaded_file(f,stored,mimetypes.guess_type(stored)[0])
+    if storage_error: return storage_error
     uri=f'/uploads/{stored}'
     return jsonify(file_uri=uri,file_url=uri)
 
@@ -2991,9 +3172,11 @@ def _verify_paystack_reference(reference):
         with db() as c: c.execute("UPDATE paystack_transactions SET status='failed',gateway_response=?,verified_at=? WHERE reference=? AND status='pending'",(json.dumps({'status':gateway.get('status'),'gateway_response':gateway.get('gateway_response')}),now(),reference))
         return None,('Paystack has not confirmed a successful payment.',400)
     with db() as c:
-        row=c.execute('SELECT * FROM paystack_transactions WHERE reference=?',(reference,)).fetchone()
+        lock_clause=' FOR UPDATE' if uses_postgres() else ''
+        row=c.execute('SELECT * FROM paystack_transactions WHERE reference=?'+lock_clause,(reference,)).fetchone()
         if not row: return None,('Payment reference was not found.',404)
         if row['status']=='success': return dict(row),None
+        if str(gateway.get('reference') or '')!=reference: return None,('The verified payment reference does not match the school transaction.',409)
         if int(gateway.get('amount') or 0)!=int(row['amount_kobo']) or str(gateway.get('currency') or '').upper()!='NGN': return None,('The verified amount or currency does not match the school invoice.',409)
         duplicate=c.execute("SELECT id FROM records WHERE entity='Payment' AND json_extract(data,'$.reference')=? LIMIT 1",(reference,)).fetchone()
         payment_id=duplicate['id'] if duplicate else str(uuid.uuid4())
@@ -3173,7 +3356,7 @@ def serve_upload(filename):
             settings=json.loads(settings_row['data'] or '{}')
             allowed = allowed or uri == settings.get('school_logo')
     if allowed:
-        return send_from_directory(UPLOAD_DIR,filename,as_attachment=False)
+        return uploaded_file_response(filename)
     if not user: return jsonify(error='Please log in to continue.'),401
     with db() as c:
         for rec in c.execute("SELECT entity,data FROM records").fetchall():
@@ -3195,7 +3378,24 @@ def serve_upload(filename):
                 linked_ids={str(x.get('_record_id') or x.get('id') or '') for x in linked_students(user)}
                 allowed=any(str(row['student_id']) in linked_ids for row in receipts)
     if not allowed: return jsonify(error='You do not have access to this document.'),403
-    return send_from_directory(UPLOAD_DIR,filename,as_attachment=False)
+    return uploaded_file_response(filename)
+
+
+def uploaded_file_response(filename):
+    try:
+        content=file_storage.read(filename)
+    except FileNotFoundError:
+        abort(404)
+    except (StorageError,ValueError):
+        app.logger.exception('Uploaded file could not be read.')
+        return jsonify(error='File storage is temporarily unavailable.'),503
+    return send_file(
+        io.BytesIO(content),
+        mimetype=mimetypes.guess_type(filename)[0] or 'application/octet-stream',
+        as_attachment=False,
+        download_name=Path(filename).name,
+        conditional=False,
+    )
 
 @app.get('/register', endpoint='register_page')
 def register_page():
@@ -3223,10 +3423,19 @@ def health_check():
     try:
         with db() as c:
             c.execute('SELECT 1').fetchone()
-    except sqlite3.Error:
+    except database_errors():
         app.logger.exception('Health check could not access the school database')
         return jsonify(status='unavailable'), 503
     return jsonify(status='ok')
+
+
+@app.get('/api/security/csrf')
+def csrf_token():
+    token=session.get('_csrf_token')
+    if not token:
+        token=secrets.token_urlsafe(32)
+        session['_csrf_token']=token
+    return jsonify(csrf_token=token)
 
 
 # V5.6 workflow APIs. These endpoints use additive tables and preserve historical rows.
@@ -3602,12 +3811,16 @@ def account_recovery_link_create():
 @app.post('/api/account/recovery-links/redeem')
 def account_recovery_link_redeem():
     b=request.get_json(silent=True) or {}; token=str(b.get('token','')); password=str(b.get('password',''))
-    if len(password)<8: return jsonify(error='Password must be at least 8 characters.'),400
+    policy_error=password_policy_error(password)
+    if policy_error: return jsonify(error=policy_error),400
     with db() as c:
         rows=c.execute('SELECT * FROM recovery_links WHERE used_at IS NULL AND revoked_at IS NULL').fetchall(); match=next((r for r in rows if check_password_hash(r['token_hash'],token)),None)
         if not match or match['expires_at']<now(): return jsonify(error='Recovery link is invalid, expired or already used.'),400
-        c.execute('UPDATE auth_users SET password_hash=? WHERE id=?',(generate_password_hash(password),match['target_user_id']))
-        c.execute('UPDATE recovery_links SET used_at=? WHERE token_hash=?',(now(),match['token_hash']))
+        claimed=c.execute('UPDATE recovery_links SET used_at=? WHERE token_hash=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>=?',
+                          (now(),match['token_hash'],now()))
+        if not claimed.rowcount: return jsonify(error='Recovery link is invalid, expired or already used.'),400
+        c.execute('UPDATE auth_users SET password_hash=?,session_version=session_version+1 WHERE id=?',
+                  (generate_password_hash(password),match['target_user_id']))
     audit({'id':match['target_user_id'],'role':'user'},'account_recovery_link_used','auth_user',match['target_user_id'],{'generated_by':match['generated_by']})
     return jsonify(ok=True)
 
@@ -3947,8 +4160,9 @@ def report_cards_publish():
         for sid,results in grouped.items():
             first=results[0]; student_name=str(first.get('student_name') or sid); admission=str(first.get('admission_no') or '')
             arm_id=str(first.get('class_arm_id') or ''); arm_name=str(first.get('class_arm_name') or first.get('level') or '')
-            c.execute('INSERT INTO report_card_archive(id,student_id,student_name,admission_no,class_arm_id,class_arm_name,session_name,term_name,session_id,term_id,results_json,published_by,published_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(student_id,session_id,term_id) DO NOTHING',(str(uuid.uuid4()),sid,student_name,admission,arm_id,arm_name,term['session_name'],term['name'],session_id,term_id,json.dumps(results),current_user()['id'],stamp))
-            if c.execute('SELECT changes()').fetchone()[0]: count+=1
+            archive_insert=c.execute('INSERT INTO report_card_archive(id,student_id,student_name,admission_no,class_arm_id,class_arm_name,session_name,term_name,session_id,term_id,results_json,published_by,published_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(student_id,session_id,term_id) DO NOTHING',(str(uuid.uuid4()),sid,student_name,admission,arm_id,arm_name,term['session_name'],term['name'],session_id,term_id,json.dumps(results),current_user()['id'],stamp))
+            if archive_insert.rowcount:
+                count+=1
             for rec,d in matched:
                 if str(d.get('student_id',''))==sid:
                     d['status']='published'; c.execute("UPDATE records SET data=?,updated_date=? WHERE id=? AND entity='Result'",(json.dumps(d),stamp,rec['id']))
@@ -3967,10 +4181,14 @@ def curriculum_document_upload():
     filename=secure_filename(f.filename or 'curriculum-document')
     ext=Path(filename).suffix.lower()
     if ext not in ('.pdf','.doc','.docx','.odt','.ppt','.pptx'): return jsonify(error='Supported curriculum documents: PDF, DOC, DOCX, ODT, PPT and PPTX.'),400
+    if not upload_content_matches(f,ext): return jsonify(error='The uploaded document content does not match its file type.'),400
     with db() as c:
         if not c.execute('SELECT 1 FROM academic_terms WHERE id=? AND session_id=?',(b['term_id'],b['session_id'])).fetchone(): return jsonify(error='Term does not belong to the selected session.'),400
         class_key=canonical_class_scope(c,b['class_key'])
-        stored=f'{uuid.uuid4().hex}_{filename}'; f.save(UPLOAD_DIR/stored); uri=f'/uploads/{stored}'; rid=str(uuid.uuid4())
+        stored=f'{uuid.uuid4().hex}{ext}'
+        storage_error=persist_uploaded_file(f,stored,mimetypes.guess_type(stored)[0])
+        if storage_error: return storage_error
+        uri=f'/uploads/{stored}'; rid=str(uuid.uuid4())
         c.execute('INSERT INTO curriculum_documents(id,title,subject_id,class_key,session_id,term_id,file_uri,file_name,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(rid,b['title'].strip(),b['subject_id'],class_key,b['session_id'],b['term_id'],uri,filename,current_user()['id'],now()))
     audit(current_user(),'curriculum_document_uploaded','curriculum_document',rid,{'filename':filename})
     return jsonify(id=rid,file_uri=uri,file_name=filename,status='pending'),201

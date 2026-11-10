@@ -1,6 +1,21 @@
 # Nigerian School Management System — V8.0 Flask Release
 
-This package keeps the supplied React/Vite application as its frontend and replaces the Base44-hosted data/authentication layer with a local Flask + SQLite service. The original page/component files, layout, navigation and styling are retained; `src/api/base44Client.js` is now a compatibility adapter that sends the existing page calls to `/api`.
+This package keeps the supplied React/Vite application as its frontend and runs the API and authentication through Flask. Set `DATABASE_URL` to use PostgreSQL (including Neon); if it is blank, the app uses SQLite for local fallback and tests. The original page/component files, layout, navigation and styling are retained; `src/api/base44Client.js` is now a compatibility adapter that sends the existing page calls to `/api`.
+
+## PostgreSQL and Neon database setup
+
+The app creates its tables and indexes when it starts. A PostgreSQL URL takes precedence over `SCHOOL_DB_PATH`; without `DATABASE_URL`, local development uses SQLite. A new PostgreSQL database starts with the application's schema and initial administrator, not the contents of an existing SQLite database. Existing SQLite records are not automatically migrated.
+
+Use two separate Neon projects or databases:
+
+- **Development:** put the development database URL in your local `.env` as `DATABASE_URL`.
+- **Production:** add the production database URL as the Render service's `DATABASE_URL` environment variable. Do not copy the development URL into Render.
+
+Neon URLs should use TLS, for example `postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require`. Keep the actual URL private: never put it in Git, a `VITE_*` setting, screenshots, or frontend code. Start from `.env.example`; do not commit `.env`. Use separate strong database passwords, and rotate a URL if it is accidentally exposed.
+
+For local SQLite-only tests, leave `DATABASE_URL` blank. To check a Neon development database locally, set its URL in `.env` and restart Flask. The app does not import records from SQLite; use only the fresh database as requested, and keep the old database untouched until you confirm the new deployment.
+
+Uploads can use local files in development or a private S3-compatible bucket in production. For Render Free, configure `UPLOAD_STORAGE=s3`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_ENDPOINT_URL`; `S3_REGION` and `S3_PREFIX` are also configurable. Cloudflare R2, Backblaze B2, or AWS S3 can be used. Keep the bucket private: the Flask route checks the user's authorization before reading an object. Do not put bucket credentials in React or `VITE_*` variables.
 
 ## GitHub and online hosting
 
@@ -9,12 +24,13 @@ GitHub is suitable for storing this source code and running the included automat
 For a Render test deployment:
 
 1. Keep this GitHub repository public or change it to private in GitHub Settings if you prefer to limit access to the source code. Public visibility means anyone can view the application code and documented local demo credentials; it does not include your local `.env`, databases, uploaded school documents, backups, editor settings, or generated dependencies, which `.gitignore` and `.dockerignore` exclude. Check the staged file list before every push; never commit real student records, production uploads, SMTP credentials, or payment secrets.
-2. In Render, create a new Blueprint from this repository and use the included `render.yaml`. The configuration builds the Docker image, checks `/healthz`, and mounts a persistent disk at `/var/data` for SQLite and uploads. Render requires a paid web service for persistent disks; check its current pricing before deploying. Free web services cannot use persistent disks: SQLite accounts, school data and uploads stored locally can be lost when the service spins down, restarts or redeploys. Devices visiting the same live Render URL share the same server database; a different URL (such as localhost or another Render service) uses a different database.
-3. During the first Render deploy, supply `INITIAL_ADMIN_EMAIL` and a unique `INITIAL_ADMIN_PASSWORD` of at least 16 characters. The Blueprint generates `SECRET_KEY` automatically. If you created a regular Web Service instead of a Blueprint, open its **Environment** settings and add `SECRET_KEY` using Render's **Generate** option (it must be a unique random value of at least 32 characters); the `render.yaml` setting is not applied to a manually configured service. Do not use the example placeholder or generate a new value on every deploy. Once the admin account has been created on the persistent database, remove the initial-admin password variable from Render's environment settings. Production refuses the known local default admin password.
-4. After the Render URL is assigned, set `PUBLIC_BASE_URL` to that HTTPS origin in Render and redeploy. Configure a provider in Admin → School Settings → School email before inviting users; on Render Free use Brevo or Resend API, not SMTP. Add Paystack secrets only if online payments are enabled. Never place secrets in `VITE_*` variables, GitHub source, or frontend files.
-5. Verify the host's `/healthz` endpoint, sign in with the first admin, configure school identity and email, send a test email, and test the main workflows with demo data before any real records are entered. The Portal Accounts directory lists invited or registered login accounts; adding a student or staff profile by itself does not create login credentials.
+2. Create separate Neon development and production databases. Put the **development** `DATABASE_URL` in your local `.env`; keep the **production** URL for Render only. The project creates a fresh schema on startup and does not migrate SQLite records.
+3. Create a private S3-compatible bucket and access key with only the permissions needed to read, write and delete objects in that bucket. In Render, create a Blueprint from this repository and use `render.yaml`. Enter the production `DATABASE_URL` and object-storage values when prompted: bucket name, endpoint URL, region, access key ID and secret access key. The Blueprint uses a Free web service with no persistent disk; uploads are stored in the external bucket. Never make the bucket public.
+4. During the first Render deploy, supply `INITIAL_ADMIN_EMAIL` and a unique `INITIAL_ADMIN_PASSWORD` of at least 16 characters containing uppercase and lowercase letters, a number, and a symbol. The Blueprint generates `SECRET_KEY` automatically. If you created a regular Web Service instead of a Blueprint, open its **Environment** settings and generate a unique random `SECRET_KEY` of at least 32 characters. Do not use the example placeholder or generate a new value on every deploy. After the first administrator can sign in, remove the initial-admin password variable from Render's environment settings. Production refuses the known local default administrator password.
+5. After Render assigns the URL, set `PUBLIC_BASE_URL` to that HTTPS origin. Configure a provider in Admin → School Settings → School email before inviting users; on Render Free use Brevo or Resend API, not SMTP. Add Paystack secrets only if online payments are enabled. Never place secrets in `VITE_*` variables, GitHub source, or frontend files.
+6. Verify the host's `/healthz` endpoint, sign in with the first admin, configure school identity and email, send a test email, and test the main workflows with demo data before any real records are entered. The Portal Accounts directory lists invited or registered login accounts; adding a student or staff profile by itself does not create login credentials.
 
-Keep an independent backup of the host's persistent volume. A persistent volume is not a backup, and the current SQLite deployment is for controlled testing rather than a multi-instance/high-availability production rollout. GitHub Actions runs the backend tests, frontend lint, and Vite build on pushes and pull requests. See [Render Blueprint configuration](https://render.com/docs/blueprint-spec) and [persistent disk limitations](https://render.com/docs/disks).
+The Render Free service can sleep, but PostgreSQL and bucket objects live outside its temporary filesystem. Configure separate database and object-storage backups and periodically test a restore before entering real school data; the application does not claim that a live Neon database or an S3 bucket is itself a backup. GitHub Actions runs the SQLite regression suite, SQL translation tests, a PostgreSQL service smoke test, frontend lint, and Vite build on pushes and pull requests. See [Render Blueprint configuration](https://render.com/docs/blueprint-spec) and [Render free instances](https://render.com/docs/free).
 
 ### Oracle Cloud Always Free VM
 
@@ -59,18 +75,18 @@ Requirements: Python 3.10+ and Node.js 20.19+ (or a current Node LTS release).
 3. Run `start.bat`.
 4. Open `http://127.0.0.1:5000`.
 
-Initial local administrator:
+Initial local-only administrator:
 
 - Email: `admin@school.local`
 - Password: `Admin123!`
 
-Change this password before using real data. Set a long private `SECRET_KEY` in the environment before exposing the server to other devices. For LAN access, set `HOST=0.0.0.0` and allow the selected port through Windows Firewall; only do this on a trusted network.
+This shared demo password is not suitable for school records or a network-facing deployment. Set `DATABASE_URL` to your separate Neon development database when you want local Windows development against PostgreSQL; leave it blank for the SQLite fallback. Set a long private `SECRET_KEY` in `.env` before exposing the server to other devices. For LAN access, set `HOST=0.0.0.0` and allow the selected port through Windows Firewall; only do this on a trusted network.
 
 ## Converted application areas
 
 The original React interface is retained, including administration (students, staff, accounts, academics, class arms, subjects, teacher assignments, attendance, results, finance, resources, timetable and settings), teacher dashboards/results/attendance/timetable, bursary, library, student portal and parent portal. The original Base44-style entity calls are routed to Flask for Student, StaffProfile, ClassArm, Subject, Assignment, Attendance, Result, FeeItem, Payment, StaffPayment, LibraryBook, LibraryLoan, Notice, ResourceItem, TimetableEntry, CalendarEvent, SchoolSettings, PortalProfile, PortalRequest, StudentDocument and User records.
 
-The backend includes SQLite persistence, session authentication, password hashing, role checks based on the source entity access rules, required-field and basic type/enum validation, CRUD and bulk CRUD endpoints, local uploads, and protected upload retrieval.
+The backend supports PostgreSQL through `DATABASE_URL` and SQLite fallback, session authentication, password hashing, server-side role checks, CRUD and bulk CRUD endpoints, local development uploads, and authorization-checked file retrieval.
 
 ## Finance and admissions workflows
 
@@ -82,14 +98,14 @@ The backend includes SQLite persistence, session authentication, password hashin
 ## Local-mode limitations (external services not migrated)
 
 - Google OAuth is not configured. The login screen's Google option is intentionally unavailable until OAuth client credentials and callback URLs are supplied.
-- Email delivery is not configured. Local account verification uses code `123456`; password reset links are printed to the Flask terminal. This is for development only.
-- File uploads are stored locally in `uploads/`; include that directory in backups. They are not cloud replicated.
+- Email delivery is not configured. In development only, a randomly generated verification code is returned when email delivery fails; password reset links are printed to the Flask terminal. Do not expose this mode publicly.
+- Local uploads are stored in `uploads/`; production Render configuration requires S3-compatible object storage. The private bucket must be configured by the operator.
 - No payment gateway credentials/provider are configured; payment records are local school records only.
 - This package is a local Flask conversion of the supplied source, not a production-hosted deployment. Validate every role workflow with test accounts before using real student data. Configure HTTPS, backups, secrets, email, OAuth, and secure file storage before deployment.
 
 ## Data and backups
 
-SQLite database: `school.db` (or `SCHOOL_DB_PATH` if set). Uploaded files: `uploads/`. Back up both together while the app is stopped. Do not delete `school.db` unless you intend to reset all records.
+When `DATABASE_URL` is blank, SQLite uses `school.db` (or `SCHOOL_DB_PATH` if set) and local uploads are in `uploads/`. When PostgreSQL is configured, the SQLite backup scripts do not back it up; arrange Neon/provider exports and a separate object-storage backup, then verify restore procedures before using real records. The project does not yet automate or test PostgreSQL/object-store backup restoration.
 
 ## Developer mode
 
@@ -115,7 +131,7 @@ Portal invitations and verification codes are sent only when an email provider i
 4. Set the **Public application URL** to an address recipients can open. `http://127.0.0.1:5000` works only on that computer; for internet use, enter the deployed HTTPS domain. Alternatively, set `PUBLIC_BASE_URL` in the server environment; it takes precedence over the saved setting. If neither is configured on Render, the app now uses Render's `RENDER_EXTERNAL_URL` automatically. Production requires HTTPS and does not fall back to a request-local address.
 5. Click **Send test email** before inviting users. Use **Resend** in Portal Accounts to send an invitation again.
 
-If email is not configured or delivery fails, the Portal Accounts page clearly reports that no email was sent and provides a secure invitation link that an administrator can copy and share. The local verification code is `123456` only in the no-email development mode.
+If email is not configured or delivery fails, the Portal Accounts page clearly reports that no email was sent and provides a secure invitation link that an administrator can copy and share. Only in development, a random verification code is returned when email delivery fails; production never issues a fixed fallback code.
 
 Portal Accounts supports permanent deletion as well as deactivation for ordinary portal accounts. Permanent deletion removes the portal User record and matching login credentials, but does not delete the linked student, teacher or parent profile. The seeded primary school administrator (`admin@school.local`) is protected from role changes, deactivation, suspension and deletion.
 
@@ -166,7 +182,7 @@ Back up `school.db` and `uploads/` before updating, as always. This update uses 
 ### Staff bank details
 
 - Staff can enter bank name, account name and a 10-digit account number under Profile & Settings → My payment details.
-- These details are encrypted in SQLite using a Fernet key derived from `SECRET_KEY`. The Bursary → Staff bank details page is the only administrative interface that decrypts and displays staff payout details. The API is restricted to the `bursar` role; Principal and Admin do not get routine access to full account numbers.
+- These details are encrypted in the configured database using a Fernet key derived from `SECRET_KEY`. The Bursary → Staff bank details page is the only administrative interface that decrypts and displays staff payout details. The API is restricted to the `bursar` role; Principal and Admin do not get routine access to full account numbers.
 - Keep the same strong `SECRET_KEY` across restarts and backups. If it is changed, existing encrypted staff bank details cannot be decrypted. Plan a key-rotation/migration before changing it.
 
 ### Profile saving and request actions
@@ -177,15 +193,16 @@ Back up `school.db` and `uploads/` before updating, as always. This update uses 
 
 ### Operational safeguards and backups
 
-- Login attempts are limited to 10 failed attempts per email/IP pair in a rolling 15-minute window.
-- Sessions are persistent for up to 8 hours; secure cookies are enabled automatically when `APP_ENV=production` (or explicitly with `COOKIE_SECURE=true`).
+- Login attempts are limited to 10 failures per email/IP pair in a rolling 15-minute window. New registrations require 12+ character passwords with uppercase, lowercase, a number, and a symbol; email verification is required before login.
+- Verification and reset tokens are stored hashed and expire; password reset/recovery increments the session version to invalidate existing sessions. Signed-cookie sessions expire after 8 hours; secure cookies are enabled in production.
+- Mutating API requests validate a session-bound CSRF token or a trusted browser origin. Production responses set HSTS, and all responses set frame, MIME-sniffing, referrer and permissions-policy headers. CORS is disabled unless exact origins are configured in `CORS_ALLOWED_ORIGINS`.
 - Production startup refuses the known development fallback secret. Set a unique, long `SECRET_KEY` and `APP_ENV=production` in the hosting environment.
-- Uploads are limited to 10 MB and an allowlist of image, PDF, Office, TXT and CSV extensions. This is an extension allowlist, not antivirus scanning; keep upload storage private and scan it at the hosting layer.
-- Run `backup.bat` (Windows) or `python backup_school.py` to create a ZIP containing a SQLite online-backup snapshot and the `uploads/` directory. Stop the application first when you need the strongest consistency guarantee for files being uploaded. Store copies off the application computer and test restoration periodically.
+- Uploads are limited to 10 MB, assigned random names, and validated against decoded image content or PDF/Office/text signatures. This is not antivirus scanning; scan documents at the storage/hosting layer and keep the object bucket private.
+- `backup.bat` and `backup_school.py` currently back up SQLite only. They are not a PostgreSQL/Neon or S3 backup solution; provision off-site backups and test restore separately.
 
 ### Deployment caveats — not yet production-certified
 
-This ZIP is a development release, not a guarantee of production readiness. Before real-school deployment, configure a production WSGI server/reverse proxy, HTTPS, a strong secret, an email provider, monitored off-device backups, malware scanning for uploads, and a production database strategy. Complete live tests with each role and representative high-volume data. V8.0 adds Paystack integration code, but the gateway still requires school-owned credentials, a public HTTPS callback and live sandbox/production verification. Bank-statement reconciliation, multi-user edit conflict handling, antivirus scanning and a complete end-to-end browser test suite still require additional deployment work. Do not use the development OTP fallback or demo accounts with real school users.
+The code changes add PostgreSQL connectivity and an S3-compatible storage path, but this repository has not yet been certified as a complete production system. Live Neon and bucket credentials were not provided, so real cloud connections are unverified. Automated PostgreSQL/object-store backups and a restore test, administrator two-factor authentication, antivirus scanning, and the full school-workflow end-to-end test matrix remain outstanding. Paystack also needs school-owned credentials and live sandbox verification. Do not use the development OTP fallback or demo accounts with real school users.
 
 
 ## V8.0 additions

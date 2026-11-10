@@ -33,7 +33,13 @@ export default function Register() {
     try {
       const result = await base44.auth.register({ email, password, invite_token: inviteToken });
       setShowOtp(true);
-      if (!result?.email_sent) setError("Email delivery is not configured on this school server. For local testing, use verification code 123456. Ask the administrator to configure a school email provider to receive emails.");
+      if (!result?.email_sent) {
+        setError(
+          result?.local_verification_code
+            ? `Email delivery is not configured. For local testing, use verification code ${result.local_verification_code}.`
+            : "Email delivery is not configured. Ask the administrator to configure a school email provider."
+        );
+      }
     } catch (err) {
       setError(err.message || "Registration failed");
     } finally {
@@ -63,7 +69,11 @@ export default function Register() {
       const result = await base44.auth.resendOtp(email);
       toast({
         title: result?.email_sent ? "Code sent" : "Email was not sent",
-        description: result?.email_sent ? "Check your inbox for the verification code." : `Local testing code: ${result?.local_verification_code || "123456"}. ${result?.email_error || "Configure the school email provider to send email."}`,
+        description: result?.email_sent
+          ? "Check your inbox for the verification code."
+          : result?.local_verification_code
+            ? `Local testing code: ${result.local_verification_code}.`
+            : result?.email_error || "Ask the administrator to configure the school email provider.",
       });
     } catch (err) {
       setError(err.message || "Failed to resend code");
@@ -200,12 +210,16 @@ export default function Register() {
               type="password"
               autoComplete="new-password"
               placeholder="••••••••"
+              minLength={12}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="pl-10 h-12"
               required
             />
           </div>
+          <p className="text-xs text-muted-foreground">
+            Use at least 12 characters with uppercase and lowercase letters, a number, and a symbol.
+          </p>
         </div>
         <div className="space-y-2">
           <Label htmlFor="confirm">Confirm Password</Label>

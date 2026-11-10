@@ -19,6 +19,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && mkdir -p /var/data/uploads
 COPY app.py ./
+COPY database.py ./
+COPY storage.py ./
 COPY base44/entities ./base44/entities
 COPY --from=frontend /app/dist ./dist
 

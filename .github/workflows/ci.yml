@@ -10,6 +10,20 @@ permissions:
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: school
+          POSTGRES_PASSWORD: school-test-only
+          POSTGRES_DB: school_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U school -d school_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,6 +38,10 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
+      - name: Smoke-test PostgreSQL backend
+        env:
+          DATABASE_URL: postgresql://school:school-test-only@localhost:5432/school_test
+        run: python tests/postgres_smoke.py
       - name: Install frontend dependencies
         run: npm ci
       - name: Lint frontend

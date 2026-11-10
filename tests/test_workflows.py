@@ -1,16 +1,38 @@
 import json
+import io
 import os
+import re
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from PIL import Image
+from flask.testing import FlaskClient
 from unittest.mock import patch
 
 _test_database = tempfile.TemporaryDirectory(prefix='school-workflow-tests-')
 os.environ['SCHOOL_DB_PATH'] = str(Path(_test_database.name) / 'tests.db')
+os.environ['DATABASE_URL'] = ''
+os.environ['UPLOAD_STORAGE'] = 'local'
 
 import app
 from werkzeug.security import generate_password_hash
+
+
+class CsrfTestClient(FlaskClient):
+    csrf_token = ''
+
+    def open(self, *args, **kwargs):
+        method=str(kwargs.get('method') or 'GET').upper()
+        if method not in ('GET','HEAD','OPTIONS'):
+            if not self.csrf_token:
+                token_response=super().open('/api/security/csrf')
+                self.csrf_token=token_response.get_json()['csrf_token']
+            headers=kwargs.setdefault('headers',{})
+            headers.setdefault('X-CSRF-Token',self.csrf_token)
+        response=super().open(*args,**kwargs)
+        self.csrf_token=response.headers.get('X-CSRF-Token') or self.csrf_token
+        return response
 
 
 class WorkflowTests(unittest.TestCase):
@@ -18,12 +40,19 @@ class WorkflowTests(unittest.TestCase):
 
     def setUp(self):
         with app.db() as conn:
-            tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+            if app.uses_postgres():
+                tables = conn.execute(
+                    "SELECT table_name AS name FROM information_schema.tables "
+                    "WHERE table_schema=current_schema() AND table_type='BASE TABLE'"
+                ).fetchall()
+            else:
+                tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
             for row in tables:
                 if row['name'] not in ('auth_users', 'school_security_settings', 'schema_migrations'):
                     conn.execute(f'DELETE FROM "{row["name"]}"')
             conn.execute("DELETE FROM auth_users WHERE lower(email) <> 'admin@school.local'")
         app.init_db()
+        app.app.test_client_class = CsrfTestClient
         self.client = app.app.test_client()
         self.add_account('principal@school.test', 'principal')
 
@@ -40,6 +69,61 @@ class WorkflowTests(unittest.TestCase):
         response = self.client.post('/api/auth/login', json={'email': email, 'password': password})
         self.assertEqual(response.status_code, 200, response.get_json())
         return response
+
+    def test_api_mutations_require_csrf_and_security_headers_are_set(self):
+        response=FlaskClient(app.app).post('/api/auth/login',json={'email':'admin@school.local','password':'Admin123!'})
+        self.assertEqual(response.status_code,403)
+        cross_site=FlaskClient(app.app).post(
+            '/api/auth/login',
+            json={'email':'admin@school.local','password':'Admin123!'},
+            headers={'Origin':'https://untrusted.example'},
+        )
+        self.assertEqual(cross_site.status_code,403)
+        same_origin=FlaskClient(app.app).post(
+            '/api/auth/login',
+            json={'email':'admin@school.local','password':'Admin123!'},
+            headers={'Origin':'http://localhost'},
+        )
+        self.assertEqual(same_origin.status_code,200,same_origin.get_json())
+        self.assertEqual(self.client.get('/healthz').headers.get('X-Content-Type-Options'),'nosniff')
+        self.assertEqual(self.client.get('/healthz').headers.get('X-Frame-Options'),'DENY')
+
+    def test_registration_requires_strong_password_and_verified_email(self):
+        weak=self.client.post('/api/auth/register',json={'email':'weak@school.test','password':'short'})
+        self.assertEqual(weak.status_code,400)
+
+        with patch.object(app,'send_mail',return_value=(True,None)) as send_mail:
+            response=self.client.post('/api/auth/register',json={
+                'email':'new.student@school.test',
+                'password':'StrongStudent123!',
+            })
+        self.assertEqual(response.status_code,201,response.get_json())
+        otp=re.search(r'(?<!\d)\d{6}(?!\d)',send_mail.call_args.args[2]).group()
+        with app.db() as conn:
+            stored=conn.execute('SELECT code FROM verification_codes WHERE email=?',('new.student@school.test',)).fetchone()['code']
+        self.assertNotEqual(stored,otp)
+        self.assertTrue(app.check_password_hash(stored,otp))
+        denied=self.client.post('/api/auth/login',json={
+            'email':'new.student@school.test',
+            'password':'StrongStudent123!',
+        })
+        self.assertEqual(denied.status_code,403)
+
+        verified=self.client.post('/api/auth/verify',json={
+            'email':'new.student@school.test',
+            'otp':otp,
+        })
+        self.assertEqual(verified.status_code,200,verified.get_json())
+        repeated=self.client.post('/api/auth/verify',json={
+            'email':'new.student@school.test',
+            'otp':otp,
+        })
+        self.assertEqual(repeated.status_code,400)
+        login=self.client.post('/api/auth/login',json={
+            'email':'new.student@school.test',
+            'password':'StrongStudent123!',
+        })
+        self.assertEqual(login.status_code,200,login.get_json())
 
     def configure_smtp(self):
         response = self.client.put('/api/admin/email-settings', json={
@@ -215,6 +299,24 @@ class WorkflowTests(unittest.TestCase):
             response.close()
         finally:
             path.unlink(missing_ok=True)
+
+    def test_public_image_upload_validates_decoded_image_content(self):
+        self.login()
+        invalid=self.client.post('/api/admin/public-site/images',data={
+            'file':(io.BytesIO(b'not an image'),'photo.png'),
+        },content_type='multipart/form-data')
+        self.assertEqual(invalid.status_code,400)
+
+        image=io.BytesIO()
+        Image.new('RGB',(1,1),(255,255,255)).save(image,format='PNG')
+        image.seek(0)
+        uploaded=self.client.post('/api/admin/public-site/images',data={
+            'file':(image,'school.png'),
+        },content_type='multipart/form-data')
+        self.assertEqual(uploaded.status_code,201,uploaded.get_json())
+        stored_path=app.UPLOAD_DIR/Path(uploaded.get_json()['file_uri']).name
+        self.assertTrue(stored_path.is_file())
+        stored_path.unlink(missing_ok=True)
 
     def test_branded_email_includes_school_details_and_inline_logo(self):
         logo_name = f'test-email-logo-{uuid.uuid4().hex}.png'
