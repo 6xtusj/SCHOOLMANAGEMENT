@@ -395,6 +395,28 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('HTTPS', response.get_json()['error'])
 
+    def test_render_external_url_is_used_when_no_public_url_is_saved(self):
+        with patch.dict(os.environ, {
+            'APP_ENV': 'production',
+            'RENDER_EXTERNAL_URL': 'https://school-example.onrender.com',
+            'PUBLIC_BASE_URL': '',
+        }):
+            with app.app.test_request_context('/'), patch.object(app, 'send_mail', return_value=(True, None)):
+                invitation = app.make_invitation('render-user', 'family@school.test', 'parent')
+                self.assertEqual(app.public_base_url(), 'https://school-example.onrender.com')
+                self.assertTrue(invitation['invite_url'].startswith('https://school-example.onrender.com/register?invite='))
+
+    def test_saved_public_url_precedes_render_external_url(self):
+        with app.db() as conn:
+            self.add_record(conn, 'SchoolSettings', {'public_base_url': 'https://school.example.org'})
+        with patch.dict(os.environ, {
+            'APP_ENV': 'production',
+            'RENDER_EXTERNAL_URL': 'https://school-example.onrender.com',
+            'PUBLIC_BASE_URL': '',
+        }):
+            with app.app.test_request_context('/'):
+                self.assertEqual(app.public_base_url(), 'https://school.example.org')
+
     def test_production_database_requires_and_uses_unique_admin_bootstrap(self):
         with tempfile.TemporaryDirectory(prefix='school-production-bootstrap-') as temp_dir:
             with patch.object(app, 'DB_PATH', Path(temp_dir) / 'production.db'), patch.dict(

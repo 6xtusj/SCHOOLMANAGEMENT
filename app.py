@@ -155,7 +155,12 @@ def smtp_config():
         'SCHOOL_ADDRESS': str(cfg.get('address') or '').strip(),
         'SCHOOL_PHONE': str(cfg.get('phone') or '').strip(),
         'SCHOOL_EMAIL': str(cfg.get('email') or '').strip(),
-        'PUBLIC_BASE_URL': str(os.environ.get('PUBLIC_BASE_URL') or cfg.get('public_base_url') or '').strip(),
+        'PUBLIC_BASE_URL': str(
+            os.environ.get('PUBLIC_BASE_URL')
+            or cfg.get('public_base_url')
+            or os.environ.get('RENDER_EXTERNAL_URL')
+            or ''
+        ).strip(),
         'EMAIL_PROVIDER': str(email.get('provider') or 'smtp').strip().lower(),
         'SMTP_HOST': str(email.get('smtp_host') or '').strip(),
         'SMTP_PORT': str(email.get('smtp_port') or '587'),
