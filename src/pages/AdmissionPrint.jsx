@@ -26,7 +26,7 @@ export default function AdmissionPrint() {
   return <main className="min-h-screen bg-gradient-to-br from-slate-100 via-sky-50 to-indigo-50 px-4 py-8 dark:from-background dark:via-background dark:to-slate-900 print:bg-white print:p-0">
     <div className="mx-auto max-w-3xl space-y-5">
     {emailSent === '1' && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900 print:hidden">A schedule confirmation email was sent to the parent / guardian address on the application.</p>}
-    {emailSent === '0' && <p role="status" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 print:hidden">Email was not sent. Print or save this letter and share the examination details with the parent / guardian. Configure school SMTP to enable email.</p>}
+    {emailSent === '0' && <p role="status" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 print:hidden">Email was not sent. Print or save this letter and share the examination details with the parent / guardian. Configure a school email provider in Admin → School Settings to enable email.</p>}
     <div className="flex justify-end gap-2 print:hidden"><Button onClick={() => window.print()}><Printer className="mr-2 h-4 w-4" />Print examination letter</Button><Button asChild variant="outline"><Link to="/">School home</Link></Button></div>
     <article className="overflow-hidden rounded-2xl border-2 border-blue-900 bg-white shadow-xl dark:bg-card print:rounded-none print:border-2 print:border-black print:shadow-none">
       <header className="bg-gradient-to-r from-blue-950 via-blue-800 to-cyan-700 px-6 py-7 text-white print:bg-blue-900">

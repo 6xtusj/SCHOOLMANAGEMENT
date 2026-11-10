@@ -105,7 +105,7 @@ export default function NotificationsSection() {
           </div>
         ))}
       </div>
-      {!emailConfigured && <p className="rounded-md bg-warning/10 p-3 text-xs text-warning">Email delivery is not configured on this local server. Set SMTP settings in Admin → School Settings to send emails.</p>}
+      {!emailConfigured && <p className="rounded-md bg-warning/10 p-3 text-xs text-warning">Email delivery is not configured on this server. Choose a provider in Admin → School Settings to send emails.</p>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="flex items-center gap-3">
         <Button onClick={save} disabled={saving}>

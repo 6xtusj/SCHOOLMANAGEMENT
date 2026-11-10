@@ -9,7 +9,7 @@ This checklist is intentionally conservative. Do not expose a school system with
 - [ ] Enable HTTPS and `COOKIE_SECURE=true` (production mode enables secure cookies automatically).
 - [ ] Run behind a maintained WSGI server and reverse proxy; do not expose Flask's development server directly.
 - [ ] Configure `PUBLIC_BASE_URL` to the final HTTPS domain.
-- [ ] Configure SMTP and test invitations, email-change verification and password recovery from real external mailboxes.
+- [ ] Configure a supported email provider and test invitations, email-change verification and password recovery from real external mailboxes. On Render Free, use Brevo or Resend API instead of SMTP.
 - [ ] Configure private upload storage, malware scanning, retention rules and restore procedures.
 - [ ] Decide the production database strategy and test backups/restore with representative data.
 

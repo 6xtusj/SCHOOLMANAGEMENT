@@ -17,7 +17,7 @@ const blank = {
   school_name: '', school_initials: '', school_logo: '', motto: '', address: '', phone: '', email: '',
   session: '2026/2027', term: 'First Term',
   session_start_date: '', session_end_date: '', term_start_date: '', term_end_date: '', term_resumption_date: '', exam_start_date: '', exam_end_date: '', term_closing_date: '', midterm_breaks: '', holidays: '',
-  public_base_url: '', smtp_host: '', smtp_port: 587, smtp_tls: true, smtp_ssl: false, smtp_user: '', smtp_password: '', smtp_from: '',
+  public_base_url: '',
   ca_weight: 40, assignment_weight: 10, test_weight: 10, exam_weight: 40, pass_mark: 40,
   salary_payment_day: 25,
 };
@@ -34,6 +34,22 @@ export default function AdminSettings() {
   const [testSending, setTestSending] = useState(false);
   const [emailDeliveries, setEmailDeliveries] = useState([]);
   const [emailLogsError, setEmailLogsError] = useState('');
+  const [emailSettings, setEmailSettings] = useState({
+    provider: 'brevo', sender_email: '', smtp_host: '', smtp_port: 587, smtp_tls: true,
+    smtp_ssl: false, smtp_user: '', gmail_client_id: '',
+  });
+  const [emailSecrets, setEmailSecrets] = useState({
+    smtp_password: '', brevo_api_key: '', resend_api_key: '',
+    gmail_client_secret: '', gmail_refresh_token: '',
+  });
+  const [emailSecretStatus, setEmailSecretStatus] = useState({
+    smtp_password: false, brevo_api_key: false, resend_api_key: false,
+    gmail_client_secret: false, gmail_refresh_token: false,
+  });
+  const [clearEmailSecrets, setClearEmailSecrets] = useState([]);
+  const [emailSettingsSaving, setEmailSettingsSaving] = useState(false);
+  const [emailSettingsSaved, setEmailSettingsSaved] = useState(false);
+  const [emailSettingsError, setEmailSettingsError] = useState('');
 
   const loadEmailDeliveries = useCallback(async () => {
     const response = await fetch('/api/admin/email-deliveries');
@@ -52,6 +68,21 @@ export default function AdminSettings() {
         setForm({ ...blank, ...record });
         setTestRecipient(record.email || '');
       }
+      try {
+        const response = await fetch('/api/admin/email-settings');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Could not load email settings.');
+        setEmailSettings((current) => ({ ...current, ...data }));
+        setEmailSecretStatus({
+          smtp_password: data.has_smtp_password,
+          brevo_api_key: data.has_brevo_api_key,
+          resend_api_key: data.has_resend_api_key,
+          gmail_client_secret: data.has_gmail_client_secret,
+          gmail_refresh_token: data.has_gmail_refresh_token,
+        });
+      } catch (error) {
+        setEmailSettingsError(error.message || 'Could not load email settings.');
+      }
       setLoaded(true);
       try {
         await loadEmailDeliveries();
@@ -65,6 +96,26 @@ export default function AdminSettings() {
     const value = e?.target ? e.target.value : e;
     setForm((f) => ({ ...f, [key]: ['ca_weight', 'assignment_weight', 'test_weight', 'exam_weight', 'pass_mark', 'salary_payment_day'].includes(key) ? Number(value) || 0 : value }));
     setSaved(false);
+  };
+
+  const setEmailField = (key) => (event) => {
+    const value = event?.target ? event.target.value : event;
+    setEmailSettings((current) => ({ ...current, [key]: value }));
+    setEmailSettingsSaved(false);
+  };
+
+  const setEmailSecret = (key) => (event) => {
+    setEmailSecrets((current) => ({ ...current, [key]: event.target.value }));
+    setClearEmailSecrets((current) => current.filter((field) => field !== key));
+    setEmailSettingsSaved(false);
+  };
+
+  const toggleClearEmailSecret = (key) => {
+    setClearEmailSecrets((current) => current.includes(key)
+      ? current.filter((field) => field !== key)
+      : [...current, key]);
+    setEmailSecrets((current) => ({ ...current, [key]: '' }));
+    setEmailSettingsSaved(false);
   };
 
   const uploadLogo = async (event) => {
@@ -127,6 +178,43 @@ export default function AdminSettings() {
       window.alert(error.message || 'School settings could not be saved.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const saveEmailSettings = async () => {
+    setEmailSettingsSaving(true);
+    setEmailSettingsError('');
+    setEmailSettingsSaved(false);
+    try {
+      const response = await fetch('/api/admin/email-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...emailSettings,
+          ...Object.fromEntries(Object.entries(emailSecrets).filter(([, value]) => value)),
+          clear_secrets: clearEmailSecrets,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Email settings could not be saved.');
+      setEmailSecretStatus((current) => {
+        const next = { ...current };
+        Object.entries(emailSecrets).forEach(([key, value]) => {
+          if (value) next[key] = true;
+        });
+        clearEmailSecrets.forEach((key) => { next[key] = false; });
+        return next;
+      });
+      setEmailSecrets({
+        smtp_password: '', brevo_api_key: '', resend_api_key: '',
+        gmail_client_secret: '', gmail_refresh_token: '',
+      });
+      setClearEmailSecrets([]);
+      setEmailSettingsSaved(true);
+    } catch (error) {
+      setEmailSettingsError(error.message || 'Email settings could not be saved.');
+    } finally {
+      setEmailSettingsSaving(false);
     }
   };
 
@@ -224,23 +312,59 @@ export default function AdminSettings() {
 
       <div className="surface mt-5 p-5">
         <h3 className="font-heading text-sm font-semibold">School email (optional)</h3>
-        <p className="mt-1 text-xs text-muted-foreground">Configure your public portal address and SMTP sender. In local development, links use the address used to open the app; in production, use the public HTTPS domain.</p>
+        <p className="mt-1 text-xs text-muted-foreground">Configure your public portal address and email provider. Render Free blocks outbound SMTP, so choose Brevo, Resend, or Gmail API there. In production, use your public HTTPS domain.</p>
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           <Field label="Public application URL"><Input type="url" value={form.public_base_url || ''} onChange={set('public_base_url')} placeholder="https://school.example.com" /></Field>
-          <Field label="SMTP host"><Input value={form.smtp_host || ''} onChange={set('smtp_host')} placeholder="smtp.gmail.com" /></Field>
-          <Field label="SMTP port"><Input type="number" value={form.smtp_port ?? 587} onChange={set('smtp_port')} /></Field>
-          <Field label="SMTP username"><Input value={form.smtp_user || ''} onChange={set('smtp_user')} /></Field>
-          <Field label="SMTP password / app password"><Input type="password" value={form.smtp_password || ''} onChange={set('smtp_password')} placeholder="Leave blank if not configured" /></Field>
-          <Field label="Sender email"><Input value={form.smtp_from || ''} onChange={set('smtp_from')} placeholder="school@example.com" /></Field>
-          <div className="flex items-center gap-5 pt-6 text-sm">
-            <label className="flex items-center gap-2"><input type="checkbox" checked={!!form.smtp_tls} onChange={(e) => setForm((f) => ({ ...f, smtp_tls: e.target.checked, smtp_ssl: false }))} /> TLS</label>
-            <label className="flex items-center gap-2"><input type="checkbox" checked={!!form.smtp_ssl} onChange={(e) => setForm((f) => ({ ...f, smtp_ssl: e.target.checked, smtp_tls: false }))} /> SSL</label>
-          </div>
+          <Field label="Email provider">
+            <Select value={emailSettings.provider} onValueChange={setEmailField('provider')}>
+              <SelectTrigger><SelectValue placeholder="Choose provider" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="brevo">Brevo API (recommended for Render Free)</SelectItem>
+                <SelectItem value="resend">Resend API</SelectItem>
+                <SelectItem value="gmail">Gmail API (OAuth)</SelectItem>
+                <SelectItem value="smtp">SMTP (not Render Free)</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Sender email"><Input type="email" value={emailSettings.sender_email || ''} onChange={setEmailField('sender_email')} placeholder="school@example.com" /></Field>
+          {emailSettings.provider === 'smtp' && <>
+            <Field label="SMTP host"><Input value={emailSettings.smtp_host || ''} onChange={setEmailField('smtp_host')} placeholder="smtp.example.com" /></Field>
+            <Field label="SMTP port"><Input type="number" value={emailSettings.smtp_port ?? 587} onChange={setEmailField('smtp_port')} /></Field>
+            <Field label="SMTP username"><Input value={emailSettings.smtp_user || ''} onChange={setEmailField('smtp_user')} /></Field>
+            <Field label="SMTP password"><Input type="password" value={emailSecrets.smtp_password} onChange={setEmailSecret('smtp_password')} placeholder={emailSecretStatus.smtp_password ? 'Saved; leave empty to keep it' : 'SMTP password or app password'} /></Field>
+            <div className="flex items-center gap-5 pt-6 text-sm">
+              <label className="flex items-center gap-2"><input type="checkbox" checked={!!emailSettings.smtp_tls} onChange={(event) => setEmailSettings((current) => ({ ...current, smtp_tls: event.target.checked, smtp_ssl: false }))} /> TLS</label>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={!!emailSettings.smtp_ssl} onChange={(event) => setEmailSettings((current) => ({ ...current, smtp_ssl: event.target.checked, smtp_tls: false }))} /> SSL</label>
+            </div>
+            {emailSecretStatus.smtp_password && <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={clearEmailSecrets.includes('smtp_password')} onChange={() => toggleClearEmailSecret('smtp_password')} /> Clear saved SMTP password</label>}
+          </>}
+          {emailSettings.provider === 'brevo' && <>
+            <Field label="Brevo API key"><Input type="password" value={emailSecrets.brevo_api_key} onChange={setEmailSecret('brevo_api_key')} placeholder={emailSecretStatus.brevo_api_key ? 'Saved; leave empty to keep it' : 'Paste your Brevo v3 API key'} /></Field>
+            {emailSecretStatus.brevo_api_key && <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={clearEmailSecrets.includes('brevo_api_key')} onChange={() => toggleClearEmailSecret('brevo_api_key')} /> Clear saved Brevo key</label>}
+          </>}
+          {emailSettings.provider === 'resend' && <>
+            <Field label="Resend API key"><Input type="password" value={emailSecrets.resend_api_key} onChange={setEmailSecret('resend_api_key')} placeholder={emailSecretStatus.resend_api_key ? 'Saved; leave empty to keep it' : 'Paste your Resend API key'} /></Field>
+            {emailSecretStatus.resend_api_key && <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={clearEmailSecrets.includes('resend_api_key')} onChange={() => toggleClearEmailSecret('resend_api_key')} /> Clear saved Resend key</label>}
+          </>}
+          {emailSettings.provider === 'gmail' && <>
+            <Field label="Google OAuth client ID"><Input value={emailSettings.gmail_client_id || ''} onChange={setEmailField('gmail_client_id')} placeholder="Google Cloud OAuth client ID" /></Field>
+            <Field label="Google OAuth client secret"><Input type="password" value={emailSecrets.gmail_client_secret} onChange={setEmailSecret('gmail_client_secret')} placeholder={emailSecretStatus.gmail_client_secret ? 'Saved; leave empty to keep it' : 'Google OAuth client secret'} /></Field>
+            <Field label="Google OAuth refresh token"><Input type="password" value={emailSecrets.gmail_refresh_token} onChange={setEmailSecret('gmail_refresh_token')} placeholder={emailSecretStatus.gmail_refresh_token ? 'Saved; leave empty to keep it' : 'Refresh token with Gmail send permission'} /></Field>
+            {emailSecretStatus.gmail_client_secret && <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={clearEmailSecrets.includes('gmail_client_secret')} onChange={() => toggleClearEmailSecret('gmail_client_secret')} /> Clear saved Google client secret</label>}
+            {emailSecretStatus.gmail_refresh_token && <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={clearEmailSecrets.includes('gmail_refresh_token')} onChange={() => toggleClearEmailSecret('gmail_refresh_token')} /> Clear saved Gmail refresh token</label>}
+          </>}
         </div>
-        <p className="mt-2 text-xs text-muted-foreground">Recipients see the school name as the sender display name and this sender email address. Gmail may apply its own sender policies.</p>
+        <p className="mt-2 text-xs text-muted-foreground">Verify your sender address/domain with Brevo or Resend before sending. Gmail uses Google OAuth (not an API key); use OAuth credentials with the Gmail send scope and a refresh token. Credential values are encrypted on the server and never returned to the browser. Render Free has temporary local storage; use Render Environment variables if these settings must survive a spin-down or redeploy.</p>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button type="button" onClick={saveEmailSettings} disabled={emailSettingsSaving || !loaded}>
+            {emailSettingsSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />} Save email settings
+          </Button>
+          {emailSettingsSaved && <span className="text-sm text-success" role="status">Email settings saved.</span>}
+          {emailSettingsError && <span className="text-sm text-destructive" role="alert">{emailSettingsError}</span>}
+        </div>
         <div className="mt-5 border-t pt-4">
           <h4 className="text-sm font-semibold">Test email and delivery history</h4>
-          <p className="mt-1 text-xs text-muted-foreground">Save the settings first. The test message is sent to this address using the saved SMTP configuration.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Save the email settings first. The test message uses the selected provider.</p>
           <div className="mt-3 flex flex-wrap items-end gap-3">
             <Field label="Test recipient"><Input type="email" value={testRecipient} onChange={(event) => setTestRecipient(event.target.value)} placeholder="you@example.com" /></Field>
             <Button type="button" onClick={sendTestEmail} disabled={testSending || !loaded || !testRecipient.trim()}>

@@ -84,7 +84,7 @@ export default function AdmissionPortal() {
           <Field label="Home address" required><Input value={form.address} onChange={(e) => set('address', e.target.value)} required maxLength={500} /></Field>
         </div></section>
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100"><p className="font-semibold">Before you submit</p><p className="mt-1 text-xs leading-5">Check the student's name and guardian email carefully. After submitting, print the examination request and bring it to the school. The schedule above will also be printed on the request.</p></div>
-        <p className="text-xs text-muted-foreground">A confirmation email with the schedule is sent to the guardian only when the school email service (SMTP) is configured.</p>
+        <p className="text-xs text-muted-foreground">A confirmation email with the schedule is sent to the guardian only when the school email provider is configured.</p>
         <Button type="submit" size="lg" className="bg-blue-800 text-white hover:bg-blue-700" disabled={busy || !levels.length}>{busy ? 'Submitting…' : 'Submit application and print exam request'} <Printer className="ml-2 h-4 w-4" /></Button>
         </div>
       </form>}

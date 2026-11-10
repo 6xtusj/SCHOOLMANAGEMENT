@@ -64,27 +64,6 @@
     },
     "term_end_date": {
       "type": "string"
-    },
-    "smtp_host": {
-      "type": "string"
-    },
-    "smtp_user": {
-      "type": "string"
-    },
-    "smtp_password": {
-      "type": "string"
-    },
-    "smtp_from": {
-      "type": "string"
-    },
-    "smtp_port": {
-      "type": "number"
-    },
-    "smtp_tls": {
-      "type": "boolean"
-    },
-    "smtp_ssl": {
-      "type": "boolean"
     }
   },
   "rls": {

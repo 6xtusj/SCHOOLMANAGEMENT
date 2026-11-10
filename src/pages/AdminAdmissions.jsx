@@ -36,7 +36,7 @@ export default function AdminAdmissions() {
       setMessage(action === 'passed'
         ? `${application.application.student_name} admitted and placed in ${result.class_arm?.name}.`
         : action === 'schedule_exam'
-          ? `Examination schedule saved. ${result.email_sent ? 'A schedule email was sent to the guardian.' : `No email was sent: ${result.email_error || 'SMTP is not configured.'}`}`
+          ? `Examination schedule saved. ${result.email_sent ? 'A schedule email was sent to the guardian.' : `No email was sent: ${result.email_error || 'School email is not configured.'}`}`
           : `Application ${result.status || 'updated'}.`);
       await load();
     } catch (e) { setError(e.message); }

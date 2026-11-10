@@ -1,5 +1,5 @@
 from __future__ import annotations
-import html
+import base64, html
 import json, mimetypes, os, re, secrets, sqlite3, uuid, smtplib, urllib.request, urllib.error, hmac
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -11,7 +11,7 @@ from email.utils import formataddr, parseaddr
 from hashlib import sha256
 from base64 import urlsafe_b64encode
 from cryptography.fernet import Fernet, InvalidToken
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from flask import Flask, jsonify, request, session, send_from_directory, abort, has_request_context
 
 ROOT = Path(__file__).resolve().parent
@@ -48,10 +48,107 @@ def db():
 def now(): return datetime.now(timezone.utc).isoformat()
 
 
+EMAIL_SECRET_FIELDS = (
+    'smtp_password',
+    'brevo_api_key',
+    'resend_api_key',
+    'gmail_client_secret',
+    'gmail_refresh_token',
+)
+EMAIL_SETTING_FIELDS = (
+    'provider', 'sender_email', 'smtp_host', 'smtp_port', 'smtp_tls', 'smtp_ssl',
+    'smtp_user', *EMAIL_SECRET_FIELDS, 'gmail_client_id',
+)
+LEGACY_EMAIL_FIELDS = {
+    'smtp_host', 'smtp_port', 'smtp_tls', 'smtp_ssl', 'smtp_user', 'smtp_password',
+    'smtp_from', 'email_provider', 'sender_email', 'brevo_api_key', 'resend_api_key',
+    'gmail_client_id', 'gmail_client_secret', 'gmail_refresh_token',
+}
+
+
+def _email_config_cipher():
+    key = urlsafe_b64encode(sha256((app.config['SECRET_KEY'] + '|email-provider-config-v1').encode()).digest())
+    return Fernet(key)
+
+
+def _read_email_provider_config():
+    with db() as c:
+        row = c.execute('SELECT config_encrypted FROM email_provider_config WHERE id=1').fetchone()
+    if row:
+        try:
+            return json.loads(_email_config_cipher().decrypt(row['config_encrypted'].encode()))
+        except (InvalidToken, json.JSONDecodeError) as exc:
+            raise RuntimeError('Saved email provider settings cannot be decrypted. Keep the same SECRET_KEY used when they were saved.') from exc
+    return {}
+
+
+def _email_config_defaults():
+    return {
+        'provider': os.environ.get('EMAIL_PROVIDER', 'smtp').strip().lower(),
+        'sender_email': os.environ.get('EMAIL_FROM', os.environ.get('SMTP_FROM', os.environ.get('SMTP_USER', ''))).strip(),
+        'smtp_host': os.environ.get('SMTP_HOST', '').strip(),
+        'smtp_port': str(os.environ.get('SMTP_PORT', '587')),
+        'smtp_tls': str(os.environ.get('SMTP_TLS', 'true')).lower() == 'true',
+        'smtp_ssl': str(os.environ.get('SMTP_SSL', 'false')).lower() == 'true',
+        'smtp_user': os.environ.get('SMTP_USER', '').strip(),
+        'smtp_password': os.environ.get('SMTP_PASSWORD', ''),
+        'brevo_api_key': os.environ.get('BREVO_API_KEY', ''),
+        'resend_api_key': os.environ.get('RESEND_API_KEY', ''),
+        'gmail_client_id': os.environ.get('GMAIL_CLIENT_ID', '').strip(),
+        'gmail_client_secret': os.environ.get('GMAIL_CLIENT_SECRET', ''),
+        'gmail_refresh_token': os.environ.get('GMAIL_REFRESH_TOKEN', ''),
+    }
+
+
+def _effective_email_config():
+    config = _email_config_defaults()
+    saved = _read_email_provider_config()
+    for key, value in saved.items():
+        if value is None or value == '':
+            continue
+        config[key] = value
+    return config
+
+
+def _migrate_legacy_email_settings(c):
+    existing = c.execute('SELECT 1 FROM email_provider_config WHERE id=1').fetchone()
+    settings_rows = c.execute(
+        "SELECT id,data FROM records WHERE entity='SchoolSettings' ORDER BY updated_date DESC"
+    ).fetchall()
+    if not existing and settings_rows:
+        try:
+            legacy = json.loads(settings_rows[0]['data'])
+        except (TypeError, json.JSONDecodeError):
+            legacy = {}
+        if not isinstance(legacy, dict):
+            legacy = {}
+        if any(legacy.get(key) for key in LEGACY_EMAIL_FIELDS):
+            config = _email_config_defaults()
+            config.update({key: legacy[key] for key in EMAIL_SETTING_FIELDS if key in legacy and legacy[key] not in ('', None)})
+            config['sender_email'] = legacy.get('smtp_from') or config.get('sender_email', '')
+            encrypted = _email_config_cipher().encrypt(json.dumps(config).encode()).decode()
+            c.execute(
+                'INSERT INTO email_provider_config(id,config_encrypted,updated_at,updated_by) VALUES(1,?,?,?)',
+                (encrypted, now(), 'system:migration'),
+            )
+    for row in settings_rows:
+        try:
+            data = json.loads(row['data'])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if LEGACY_EMAIL_FIELDS.intersection(data):
+            for key in LEGACY_EMAIL_FIELDS:
+                data.pop(key, None)
+            c.execute('UPDATE records SET data=?,updated_date=? WHERE id=?', (json.dumps(data), now(), row['id']))
+
+
 def smtp_config():
     with db() as c:
         row = c.execute("SELECT data FROM records WHERE entity='SchoolSettings' ORDER BY updated_date DESC LIMIT 1").fetchone()
     cfg = json.loads(row['data']) if row else {}
+    email = _effective_email_config()
     return {
         'SCHOOL_NAME': str(cfg.get('school_name') or '').strip(),
         'SCHOOL_LOGO': str(cfg.get('school_logo') or '').strip(),
@@ -59,14 +156,33 @@ def smtp_config():
         'SCHOOL_PHONE': str(cfg.get('phone') or '').strip(),
         'SCHOOL_EMAIL': str(cfg.get('email') or '').strip(),
         'PUBLIC_BASE_URL': str(os.environ.get('PUBLIC_BASE_URL') or cfg.get('public_base_url') or '').strip(),
-        'SMTP_HOST': str(cfg.get('smtp_host') or os.environ.get('SMTP_HOST', '')).strip(),
-        'SMTP_PORT': str(cfg.get('smtp_port') or os.environ.get('SMTP_PORT', '587')),
-        'SMTP_TLS': str(cfg.get('smtp_tls', os.environ.get('SMTP_TLS', 'true'))).lower(),
-        'SMTP_SSL': str(cfg.get('smtp_ssl', os.environ.get('SMTP_SSL', 'false'))).lower(),
-        'SMTP_USER': str(cfg.get('smtp_user') or os.environ.get('SMTP_USER', '')).strip(),
-        'SMTP_PASSWORD': str(cfg.get('smtp_password') or os.environ.get('SMTP_PASSWORD', '')),
-        'SMTP_FROM': str(cfg.get('smtp_from') or os.environ.get('SMTP_FROM', os.environ.get('SMTP_USER', ''))).strip(),
+        'EMAIL_PROVIDER': str(email.get('provider') or 'smtp').strip().lower(),
+        'SMTP_HOST': str(email.get('smtp_host') or '').strip(),
+        'SMTP_PORT': str(email.get('smtp_port') or '587'),
+        'SMTP_TLS': str(email.get('smtp_tls', True)).lower(),
+        'SMTP_SSL': str(email.get('smtp_ssl', False)).lower(),
+        'SMTP_USER': str(email.get('smtp_user') or '').strip(),
+        'SMTP_PASSWORD': str(email.get('smtp_password') or ''),
+        'SMTP_FROM': str(email.get('sender_email') or '').strip(),
+        'BREVO_API_KEY': str(email.get('brevo_api_key') or ''),
+        'RESEND_API_KEY': str(email.get('resend_api_key') or ''),
+        'GMAIL_CLIENT_ID': str(email.get('gmail_client_id') or '').strip(),
+        'GMAIL_CLIENT_SECRET': str(email.get('gmail_client_secret') or ''),
+        'GMAIL_REFRESH_TOKEN': str(email.get('gmail_refresh_token') or ''),
     }
+
+
+def email_provider_is_configured():
+    cfg = smtp_config()
+    provider = cfg['EMAIL_PROVIDER']
+    if not cfg['SMTP_FROM']:
+        return False
+    return {
+        'smtp': bool(cfg['SMTP_HOST']),
+        'brevo': bool(cfg['BREVO_API_KEY']),
+        'resend': bool(cfg['RESEND_API_KEY']),
+        'gmail': bool(cfg['GMAIL_CLIENT_ID'] and cfg['GMAIL_CLIENT_SECRET'] and cfg['GMAIL_REFRESH_TOKEN']),
+    }.get(provider, False)
 
 
 class PublicBaseUrlError(ValueError):
@@ -192,31 +308,42 @@ def branded_email_message(to_email, subject, body, branding=None, sender=None, a
 
 
 def send_mail(to_email, subject, body, action_label=None):
-    # SMTP is optional; manual invitation links remain available without it.
     cfg = smtp_config()
-    host = cfg['SMTP_HOST']
+    provider = cfg['EMAIL_PROVIDER']
     sender = cfg['SMTP_FROM']
-    if not host or not sender:
-        error = 'Email is not configured. Set SMTP_HOST and SMTP_FROM in School Settings or the server environment.'
+    provider_ready = {
+        'smtp': bool(cfg['SMTP_HOST']),
+        'brevo': bool(cfg['BREVO_API_KEY']),
+        'resend': bool(cfg['RESEND_API_KEY']),
+        'gmail': bool(cfg['GMAIL_CLIENT_ID'] and cfg['GMAIL_CLIENT_SECRET'] and cfg['GMAIL_REFRESH_TOKEN']),
+    }
+    if provider not in provider_ready:
+        error = 'Choose SMTP, Brevo, Resend, or Gmail API in School Settings.'
+        log_email_delivery(to_email, subject, 'failed', error)
+        return False, error
+    if not sender or not provider_ready[provider]:
+        error = f'{provider.title()} email is not fully configured. Check the provider credentials and sender email in School Settings.'
         log_email_delivery(to_email, subject, 'failed', error)
         return False, error
     try:
         msg = branded_email_message(to_email, subject, body, cfg, sender, action_label)
-        port = int(cfg['SMTP_PORT'])
-        if cfg['SMTP_SSL'] == 'true':
-            with smtplib.SMTP_SSL(host, port, timeout=20) as server:
-                user = cfg['SMTP_USER']
-                if user: server.login(user, cfg['SMTP_PASSWORD'])
-                refused = server.send_message(msg)
-                if refused: raise smtplib.SMTPRecipientsRefused(refused)
+        if provider == 'smtp':
+            port = int(cfg['SMTP_PORT'])
+            if cfg['SMTP_SSL'] == 'true':
+                with smtplib.SMTP_SSL(cfg['SMTP_HOST'], port, timeout=20) as server:
+                    if cfg['SMTP_USER']: server.login(cfg['SMTP_USER'], cfg['SMTP_PASSWORD'])
+                    refused = server.send_message(msg)
+            else:
+                with smtplib.SMTP(cfg['SMTP_HOST'], port, timeout=20) as server:
+                    server.ehlo()
+                    if cfg['SMTP_TLS'] == 'true': server.starttls(); server.ehlo()
+                    if cfg['SMTP_USER']: server.login(cfg['SMTP_USER'], cfg['SMTP_PASSWORD'])
+                    refused = server.send_message(msg)
+            if refused: raise smtplib.SMTPRecipientsRefused(refused)
+        elif provider in ('brevo', 'resend'):
+            _send_api_email(provider, cfg, msg)
         else:
-            with smtplib.SMTP(host, port, timeout=20) as server:
-                server.ehlo()
-                if cfg['SMTP_TLS'] == 'true': server.starttls(); server.ehlo()
-                user = cfg['SMTP_USER']
-                if user: server.login(user, cfg['SMTP_PASSWORD'])
-                refused = server.send_message(msg)
-                if refused: raise smtplib.SMTPRecipientsRefused(refused)
+            _send_gmail_api_email(cfg, msg)
         log_email_delivery(to_email, subject, 'sent')
         return True, None
     except Exception as exc:
@@ -224,6 +351,101 @@ def send_mail(to_email, subject, body, action_label=None):
         error = f'{type(exc).__name__}: {exc}'[:1000]
         log_email_delivery(to_email, subject, 'failed', error)
         return False, error
+
+
+def _email_message_payload(message):
+    plain = message.get_body(preferencelist=('plain',)).get_content()
+    html_part = message.get_body(preferencelist=('html',))
+    html_content = html_part.get_content() if html_part else ''
+    attachments = []
+    for part in message.walk():
+        content_id = part.get('Content-ID')
+        if not content_id:
+            continue
+        content = part.get_payload(decode=True)
+        if not content:
+            continue
+        attachments.append({
+            'filename': part.get_filename() or 'school-logo',
+            'content': base64.b64encode(content).decode('ascii'),
+            'content_id': content_id.strip('<>'),
+        })
+    return plain, html_content, attachments
+
+
+def _provider_http_request(url, data, headers):
+    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode('utf-8', errors='replace')[:500]
+        raise RuntimeError(f'Email provider returned HTTP {exc.code}: {detail or exc.reason}') from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f'Could not connect to the email provider: {exc.reason}') from exc
+
+
+def _send_api_email(provider, cfg, message):
+    plain, html_content, attachments = _email_message_payload(message)
+    if provider == 'brevo':
+        payload = {
+            'sender': {'name': str(message['From']).split('<', 1)[0].strip().strip('"'), 'email': cfg['SMTP_FROM']},
+            'to': [{'email': str(message['To'])}],
+            'subject': str(message['Subject']),
+            'textContent': plain,
+            'htmlContent': html_content,
+        }
+        if attachments:
+            payload['attachment'] = [
+                {'name': item['filename'], 'content': item['content'], 'contentId': item['content_id']}
+                for item in attachments
+            ]
+        url = 'https://api.brevo.com/v3/smtp/email'
+        headers = {'api-key': cfg['BREVO_API_KEY']}
+    else:
+        payload = {
+            'from': str(message['From']),
+            'to': [str(message['To'])],
+            'subject': str(message['Subject']),
+            'text': plain,
+            'html': html_content,
+        }
+        if attachments:
+            payload['attachments'] = [
+                {'filename': item['filename'], 'content': item['content'], 'content_id': item['content_id']}
+                for item in attachments
+            ]
+        url = 'https://api.resend.com/emails'
+        headers = {'Authorization': f"Bearer {cfg['RESEND_API_KEY']}"}
+    _provider_http_request(
+        url,
+        json.dumps(payload).encode(),
+        {'Content-Type': 'application/json', **headers},
+    )
+
+
+def _send_gmail_api_email(cfg, message):
+    token_data = urlencode({
+        'client_id': cfg['GMAIL_CLIENT_ID'],
+        'client_secret': cfg['GMAIL_CLIENT_SECRET'],
+        'refresh_token': cfg['GMAIL_REFRESH_TOKEN'],
+        'grant_type': 'refresh_token',
+    }).encode()
+    token_response = _provider_http_request(
+        'https://oauth2.googleapis.com/token',
+        token_data,
+        {'Content-Type': 'application/x-www-form-urlencoded'},
+    )
+    try:
+        access_token = json.loads(token_response)['access_token']
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError('Google OAuth did not return an access token. Check Gmail API OAuth credentials.') from exc
+    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('ascii').rstrip('=')
+    _provider_http_request(
+        'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+        json.dumps({'raw': raw_message}).encode(),
+        {'Content-Type': 'application/json', 'Authorization': f'Bearer {access_token}'},
+    )
 
 
 def log_email_delivery(to_email, subject, status, error=None):
@@ -558,7 +780,7 @@ def notification_preferences():
         if row:
             preferences.update(json.loads(row['preferences_json'] or '{}'))
         return jsonify(email_enabled=bool(row['email_enabled']) if row else True, categories=preferences,
-                       email_configured=bool(smtp_config()['SMTP_HOST'] and smtp_config()['SMTP_FROM']))
+                       email_configured=email_provider_is_configured())
 
     body = request.get_json(silent=True) or {}
     categories = body.get('categories')
@@ -927,6 +1149,77 @@ def admin_email_deliveries():
     return jsonify([dict(row) for row in rows])
 
 
+@app.get('/api/admin/email-settings')
+@role_required('admin')
+def admin_email_settings():
+    config = _effective_email_config()
+    return jsonify({
+        'provider': config.get('provider', 'smtp'),
+        'sender_email': config.get('sender_email', ''),
+        'smtp_host': config.get('smtp_host', ''),
+        'smtp_port': config.get('smtp_port', '587'),
+        'smtp_tls': bool(config.get('smtp_tls', True)),
+        'smtp_ssl': bool(config.get('smtp_ssl', False)),
+        'smtp_user': config.get('smtp_user', ''),
+        'gmail_client_id': config.get('gmail_client_id', ''),
+        'has_smtp_password': bool(config.get('smtp_password')),
+        'has_brevo_api_key': bool(config.get('brevo_api_key')),
+        'has_resend_api_key': bool(config.get('resend_api_key')),
+        'has_gmail_client_secret': bool(config.get('gmail_client_secret')),
+        'has_gmail_refresh_token': bool(config.get('gmail_refresh_token')),
+    })
+
+
+@app.put('/api/admin/email-settings')
+@role_required('admin')
+def admin_save_email_settings():
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(error='Email settings must be a JSON object.'), 400
+    config = _effective_email_config()
+    provider = str(body.get('provider', config.get('provider', 'smtp'))).strip().lower()
+    if provider not in ('smtp', 'brevo', 'resend', 'gmail'):
+        return jsonify(error='Choose SMTP, Brevo, Resend, or Gmail API.'), 400
+    sender = str(body.get('sender_email', config.get('sender_email', ''))).strip().lower()
+    if sender and not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', sender):
+        return jsonify(error='Enter a valid sender email address.'), 400
+    config.update({
+        'provider': provider,
+        'sender_email': sender,
+        'smtp_host': str(body.get('smtp_host', config.get('smtp_host', ''))).strip(),
+        'smtp_user': str(body.get('smtp_user', config.get('smtp_user', ''))).strip(),
+        'gmail_client_id': str(body.get('gmail_client_id', config.get('gmail_client_id', ''))).strip(),
+        'smtp_tls': bool(body.get('smtp_tls', config.get('smtp_tls', True))),
+        'smtp_ssl': bool(body.get('smtp_ssl', config.get('smtp_ssl', False))),
+    })
+    try:
+        port = int(body.get('smtp_port', config.get('smtp_port', '587')))
+    except (TypeError, ValueError):
+        return jsonify(error='SMTP port must be a number from 1 to 65535.'), 400
+    if not 1 <= port <= 65535:
+        return jsonify(error='SMTP port must be a number from 1 to 65535.'), 400
+    config['smtp_port'] = str(port)
+    if config['smtp_tls'] and config['smtp_ssl']:
+        return jsonify(error='Choose either TLS or SSL for SMTP, not both.'), 400
+    clear_secrets = body.get('clear_secrets', [])
+    if not isinstance(clear_secrets, list) or any(key not in EMAIL_SECRET_FIELDS for key in clear_secrets):
+        return jsonify(error='Invalid credential-clear request.'), 400
+    for key in EMAIL_SECRET_FIELDS:
+        if key in clear_secrets:
+            config[key] = ''
+        elif body.get(key):
+            config[key] = str(body[key]).strip()
+    encrypted = _email_config_cipher().encrypt(json.dumps(config).encode()).decode()
+    with db() as c:
+        c.execute(
+            'INSERT INTO email_provider_config(id,config_encrypted,updated_at,updated_by) VALUES(1,?,?,?) '
+            'ON CONFLICT(id) DO UPDATE SET config_encrypted=excluded.config_encrypted,updated_at=excluded.updated_at,updated_by=excluded.updated_by',
+            (encrypted, now(), current_user()['id']),
+        )
+    audit(current_user(), 'school_email_settings_updated', 'email_provider_config', '1', {'provider': provider})
+    return jsonify(ok=True, message='Email provider settings saved.')
+
+
 @app.post('/api/admin/email-test')
 @role_required('admin')
 def admin_send_test_email():
@@ -962,6 +1255,8 @@ def init_db():
         migrate_schema(c)
         c.execute('CREATE TABLE IF NOT EXISTS auth_users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, full_name TEXT DEFAULT "", role TEXT DEFAULT "user", account_status TEXT DEFAULT "active", created_date TEXT NOT NULL)')
         c.execute('CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, entity TEXT NOT NULL, data TEXT NOT NULL, created_date TEXT NOT NULL, updated_date TEXT NOT NULL)')
+        c.execute('CREATE TABLE IF NOT EXISTS email_provider_config (id INTEGER PRIMARY KEY CHECK(id=1), config_encrypted TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT)')
+        _migrate_legacy_email_settings(c)
         c.execute('CREATE INDEX IF NOT EXISTS idx_auth_users_email_lower ON auth_users(lower(email))')
         c.execute("CREATE INDEX IF NOT EXISTS idx_portal_users_email ON records(entity, lower(json_extract(data,'$.email')))")
         c.execute("CREATE INDEX IF NOT EXISTS idx_portal_users_role ON records(entity, lower(json_extract(data,'$.role')))")
@@ -1396,6 +1691,9 @@ def can_write(user, entity, action, row=None):
 
 
 def validate_entity(name, data, partial=False):
+    if not isinstance(data, dict): return 'Record must be a JSON object.'
+    if name == 'SchoolSettings' and LEGACY_EMAIL_FIELDS.intersection(data):
+        return 'Configure email credentials in the administrator-only School email settings instead.'
     if name == 'SchoolSettings' and isinstance(data, dict) and 'public_base_url' in data:
         url_error = validate_public_base_url(str(data.get('public_base_url') or '').strip())
         if url_error:
@@ -1411,7 +1709,7 @@ def validate_entity(name, data, partial=False):
         if level not in ('JSS1', 'JSS2', 'JSS3', 'SS1', 'SS2', 'SS3'):
             return 'Class level must be JSS 1, JSS 2, JSS 3, SS 1, SS 2 or SS 3.'
     schema = SCHEMAS.get(name, {})
-    if not isinstance(data, dict): return 'Record must be a JSON object.'
+
     if not partial:
         missing = [k for k in schema.get('required', []) if data.get(k) in (None, '')]
         if missing: return 'Missing required fields: ' + ', '.join(missing)
@@ -1522,7 +1820,12 @@ def sync_school_settings_period(conn, data, user):
 
 
 def record_out(row):
-    d = json.loads(row['data']); d.update(id=row['id'], created_date=row['created_date'], updated_date=row['updated_date']); return d
+    d = json.loads(row['data'])
+    if row['entity'] == 'SchoolSettings' and isinstance(d, dict):
+        for key in LEGACY_EMAIL_FIELDS:
+            d.pop(key, None)
+    d.update(id=row['id'], created_date=row['created_date'], updated_date=row['updated_date'])
+    return d
 
 @app.get('/api/app/settings')
 def public_settings(): return jsonify({'id':'standalone-school','public_settings':{}})

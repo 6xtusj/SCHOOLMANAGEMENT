@@ -33,7 +33,7 @@ export default function Register() {
     try {
       const result = await base44.auth.register({ email, password, invite_token: inviteToken });
       setShowOtp(true);
-      if (!result?.email_sent) setError("Email delivery is not configured on this school server. For local testing, use verification code 123456. Ask the administrator to configure SMTP to receive emails.");
+      if (!result?.email_sent) setError("Email delivery is not configured on this school server. For local testing, use verification code 123456. Ask the administrator to configure a school email provider to receive emails.");
     } catch (err) {
       setError(err.message || "Registration failed");
     } finally {
@@ -63,7 +63,7 @@ export default function Register() {
       const result = await base44.auth.resendOtp(email);
       toast({
         title: result?.email_sent ? "Code sent" : "Email was not sent",
-        description: result?.email_sent ? "Check your inbox for the verification code." : `Local testing code: ${result?.local_verification_code || "123456"}. ${result?.email_error || "Configure SMTP to send email."}`,
+        description: result?.email_sent ? "Check your inbox for the verification code." : `Local testing code: ${result?.local_verification_code || "123456"}. ${result?.email_error || "Configure the school email provider to send email."}`,
       });
     } catch (err) {
       setError(err.message || "Failed to resend code");
