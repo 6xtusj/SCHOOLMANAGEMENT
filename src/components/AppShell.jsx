@@ -46,17 +46,17 @@ export default function AppShell({ role, children }) {
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-[100dvh] bg-background">
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 border-r border-sidebar-border lg:block">
         <AppSidebar role={portalRole} schoolName={school} schoolLogo={logo} />
       </aside>
 
       <div className="lg:pl-64">
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-xl sm:px-6">
+        <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-2 border-b border-border bg-background/85 px-3 backdrop-blur-xl sm:gap-3 sm:px-6">
           <div className="flex min-w-0 items-center gap-2">
             <Sheet open={open} onOpenChange={setOpen}>
               <SheetTrigger asChild>
-                <Button variant="ghost" size="icon" className="lg:hidden">
+                <Button variant="ghost" size="icon" className="h-11 w-11 lg:hidden">
                   <Menu className="h-5 w-5" />
                 </Button>
               </SheetTrigger>
@@ -64,25 +64,25 @@ export default function AppShell({ role, children }) {
                 <AppSidebar role={portalRole} schoolName={school} schoolLogo={logo} onNavigate={() => setOpen(false)} />
               </SheetContent>
             </Sheet>
-            <span className="truncate font-heading text-sm font-medium text-muted-foreground">
+            <span className="hidden min-w-0 truncate font-heading text-sm font-medium text-muted-foreground sm:block">
               {new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}
             </span>
           </div>
 
           <div className="flex items-center gap-1">
-            <Button asChild variant="ghost" size="sm">
-              <Link to="/workspace"><LayoutDashboard className="mr-2 h-4 w-4" />Dashboard</Link>
+            <Button asChild variant="ghost" size="sm" className="h-11 w-11 px-0 sm:h-8 sm:w-auto sm:px-3">
+              <Link to="/workspace" aria-label="Dashboard"><LayoutDashboard className="h-4 w-4 sm:mr-2" /><span className="hidden sm:inline">Dashboard</span></Link>
             </Button>
-            <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
+            <Button variant="ghost" size="icon" className="h-11 w-11 sm:h-9 sm:w-9" onClick={toggleTheme} aria-label="Toggle theme">
               {theme === 'dark' ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
             </Button>
-            <Button variant="ghost" size="icon" aria-label="Sign out" onClick={() => base44.auth.logout('/login')}>
+            <Button variant="ghost" size="icon" className="h-11 w-11 sm:h-9 sm:w-9" aria-label="Sign out" onClick={() => base44.auth.logout('/login')}>
               <LogOut className="h-[18px] w-[18px]" />
             </Button>
           </div>
         </header>
 
-        <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:py-8">{children}</main>
+        <main className="mx-auto w-full min-w-0 max-w-7xl px-3 py-5 sm:px-6 sm:py-6 lg:py-8">{children}</main>
       </div>
     </div>
   );

@@ -121,6 +121,34 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()['error'], 'Invalid portal role.')
 
+    def test_portal_directory_backfills_accounts_with_login_only(self):
+        auth_id = self.add_account('directory-only@school.test', 'teacher')
+        self.login()
+        response = self.client.get('/api/admin/portal-accounts?q=directory-only%40school.test')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload['total'], 1)
+        account = payload['items'][0]
+        self.assertEqual(account['email'], 'directory-only@school.test')
+        self.assertEqual(account['role'], 'teacher')
+        self.assertEqual(account['account_status'], 'active')
+        self.assertNotEqual(account['id'], auth_id)
+        with app.db() as conn:
+            record = conn.execute(
+                "SELECT data FROM records WHERE entity='User' AND lower(json_extract(data,'$.email'))=?",
+                ('directory-only@school.test',),
+            ).fetchone()
+            self.assertIsNotNone(record)
+            self.assertEqual(json.loads(record['data'])['role'], 'teacher')
+        updated = self.client.patch(
+            f"/api/entities/User/{account['id']}",
+            json={'account_status': 'deactivated'},
+        )
+        self.assertEqual(updated.status_code, 200, updated.get_json())
+        with app.db() as conn:
+            auth = conn.execute('SELECT account_status FROM auth_users WHERE id=?', (auth_id,)).fetchone()
+            self.assertEqual(auth['account_status'], 'deactivated')
+
     def test_bursary_data_endpoints_load_for_bursar(self):
         self.add_account('bursar@school.test', 'bursar')
         self.login('bursar@school.test', self.password)

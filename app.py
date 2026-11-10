@@ -1175,6 +1175,34 @@ def admin_email_settings():
     })
 
 
+def sync_portal_account_records(conn):
+    """Create missing directory records for existing login accounts without changing credentials."""
+    primary = conn.execute(
+        'SELECT primary_admin_user_id FROM school_security_settings WHERE id=1'
+    ).fetchone()
+    primary_id = primary['primary_admin_user_id'] if primary else None
+    accounts = conn.execute(
+        "SELECT a.id,a.email,a.full_name,a.role,a.account_status,a.created_date "
+        "FROM auth_users a WHERE NOT EXISTS ("
+        "SELECT 1 FROM records r WHERE r.entity='User' "
+        "AND lower(json_extract(r.data,'$.email'))=lower(a.email))"
+    ).fetchall()
+    for account in accounts:
+        stamp = account['created_date'] or now()
+        data = {
+            'email': account['email'],
+            'full_name': account['full_name'] or '',
+            'role': account['role'] or 'user',
+            'account_status': account['account_status'] or 'active',
+        }
+        if account['id'] == primary_id:
+            data['is_primary_admin'] = True
+        conn.execute(
+            'INSERT INTO records(id,entity,data,created_date,updated_date) VALUES(?,?,?,?,?)',
+            (str(uuid.uuid4()), 'User', json.dumps(data), stamp, stamp),
+        )
+
+
 @app.put('/api/admin/email-settings')
 @role_required('admin')
 def admin_save_email_settings():
@@ -2322,6 +2350,7 @@ def admin_portal_accounts():
         clauses.append("lower(COALESCE(json_extract(r.data,'$.account_status'),u.account_status,'pending'))=?"); params.append(status)
     where=' AND '.join(clauses)
     with db() as c:
+        sync_portal_account_records(c)
         total=int(c.execute(f"SELECT COUNT(*) FROM records r LEFT JOIN auth_users u ON lower(u.email)=lower(json_extract(r.data,'$.email')) WHERE {where}",params).fetchone()[0])
         pages=max(1,(total+per_page-1)//per_page)
         page=min(page,pages)

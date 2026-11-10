@@ -108,7 +108,7 @@ export default function PortalAccounts() {
       <div className="surface overflow-hidden">
         <div className="space-y-3 border-b border-border p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div><h3 className="font-heading text-sm font-semibold">Portal directory</h3><p className="text-xs text-muted-foreground">Search and filter accounts on the server, including large school directories.</p></div>
+            <div><h3 className="font-heading text-sm font-semibold">Portal directory</h3><p className="text-xs text-muted-foreground">Search and filter portal login accounts saved on this server, including large school directories. Student or staff records alone are not portal accounts.</p></div>
             <Button variant="outline" size="sm" className="gap-2" onClick={() => load()} disabled={loading}><RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh</Button>
           </div>
           <div className="grid gap-2 sm:grid-cols-[minmax(180px,1fr)_160px_160px]">

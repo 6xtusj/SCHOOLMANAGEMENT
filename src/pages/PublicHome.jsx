@@ -33,16 +33,21 @@ export default function PublicHome() {
   }, []);
 
   return (
-    <main className="min-h-screen bg-background">
+    <main className="min-h-[100dvh] bg-background">
       <header className="border-b bg-card">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
-          <Link to="/" aria-label={`${site.school_name} homepage`} className="flex items-center gap-3 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-2 px-3 py-3 sm:gap-4 sm:px-6 sm:py-4">
+          <Link to="/" aria-label={`${site.school_name} homepage`} className="flex min-w-0 flex-1 items-center gap-2 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:gap-3">
             {site.school_logo && <img src={site.school_logo} alt="" className="h-11 w-11 rounded-md object-contain" />}
-            <div><p className="font-heading text-lg font-bold">{site.school_name}</p>{site.motto && <p className="text-xs text-muted-foreground">{site.motto}</p>}</div>
+            <div className="min-w-0"><p className="truncate font-heading text-base font-bold sm:text-lg">{site.school_name}</p>{site.motto && <p className="hidden truncate text-xs text-muted-foreground sm:block">{site.motto}</p>}</div>
           </Link>
-          <nav className="flex items-center gap-2">
-            {site.admissions_available && <Button asChild variant="outline"><Link to="/admissions">Admissions</Link></Button>}
-            <Button asChild><Link to="/login">Portal login</Link></Button>
+          <nav className="flex shrink-0 items-center gap-1 sm:gap-2">
+            {site.admissions_available && <>
+              <Button asChild variant="outline" size="icon" className="sm:hidden">
+                <Link to="/admissions" aria-label="Admissions"><GraduationCap className="h-4 w-4" /></Link>
+              </Button>
+              <Button asChild variant="outline" className="hidden sm:inline-flex"><Link to="/admissions">Admissions</Link></Button>
+            </>}
+            <Button asChild size="sm" className="h-10 px-3 sm:h-9"><Link to="/login">Portal login</Link></Button>
           </nav>
         </div>
       </header>
