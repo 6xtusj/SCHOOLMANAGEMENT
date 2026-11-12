@@ -3428,8 +3428,8 @@ def health_check():
             c.execute('SELECT 1').fetchone()
     except Exception:
         app.logger.exception('Health check could not access the school database')
-        return jsonify(status='unavailable'), 503
-    return jsonify(status='ok')
+        return jsonify(status='unavailable', database='unavailable'), 503
+    return jsonify(status='ok', database='ok', storage=file_storage.mode)
 
 
 @app.get('/api/security/csrf')

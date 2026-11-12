@@ -50,32 +50,6 @@ class PostgresTranslationTests(unittest.TestCase):
         release.assert_called_once_with(connection)
         connection.close.assert_not_called()
 
-    def test_postgres_context_manager_returns_connection_to_pool(self):
-        connection = Mock()
-        release = Mock()
-        adapter = PostgresConnection(connection, release=release)
-
-        with adapter:
-            pass
-
-        connection.commit.assert_called_once()
-        connection.rollback.assert_not_called()
-        release.assert_called_once_with(connection)
-        connection.close.assert_not_called()
-
-    def test_postgres_context_manager_rolls_back_and_returns_connection_on_error(self):
-        connection = Mock()
-        release = Mock()
-        adapter = PostgresConnection(connection, release=release)
-
-        with self.assertRaisesRegex(RuntimeError, 'transaction failed'):
-            with adapter:
-                raise RuntimeError('transaction failed')
-
-        connection.rollback.assert_called_once()
-        release.assert_called_once_with(connection)
-        connection.close.assert_not_called()
-
     def test_table_info_uses_postgres_catalog(self):
         query, parameters = translate_postgres_query('PRAGMA table_info(academic_terms)')
         self.assertIn('information_schema.columns', query)

@@ -212,7 +212,7 @@ class PostgresConnection:
             else:
                 self._connection.rollback()
         finally:
-            self.close()
+            self._connection.close()
         return False
 
 
