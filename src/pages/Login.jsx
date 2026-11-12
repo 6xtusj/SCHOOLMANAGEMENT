@@ -48,7 +48,7 @@ export default function Login() {
             to={"/register" + (returnTo !== "/" ? "?returnTo=" + encodeURIComponent(returnTo) : "")}
             className="text-primary font-medium hover:underline"
           >
-            Create one
+            Create an account
           </Link>
         </>
       }
