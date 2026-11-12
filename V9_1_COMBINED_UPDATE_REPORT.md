@@ -48,3 +48,12 @@ After deploying this version, open `/healthz`. A Render deployment intended for 
 - Conduct load tests with realistic records and concurrent users on the chosen paid/production capacity.
 
 This release improves persistence diagnosis and reliability but is not a certification of production readiness. No live credentials or real hosting environment were available for end-to-end verification.
+
+
+## V9.2 — Neon-backed private file storage replacement
+
+The Cloudflare R2/S3 dependency has been removed from the application and Render Blueprint. Production upload storage now uses PostgreSQL `BYTEA` (Neon) in an additive `stored_files` table. The table records filename, MIME type, size, SHA-256 digest and creation time. Existing `/api/files/upload`, `/uploads/<filename>`, signed-file reference, public-site image, curriculum-document and fee-receipt flows retain their existing URI format and authorization checks. Local development can continue to use `UPLOAD_STORAGE=local`; Render Blueprint now sets `UPLOAD_STORAGE=database`. The database backend requires a PostgreSQL `DATABASE_URL`.
+
+The migration is additive (schema migration version 8); it does not drop or rewrite existing school records. Existing local files in an ignored `uploads/` folder are not automatically copied to Neon; copy those files before deployment if they contain uploads that must be retained. Since the Render instance failed to boot under the previous S3 guard, there may be no production uploads to migrate, but confirm before removing any old persistent disk or backup.
+
+Verification for this replacement is recorded in `V9_2_NEON_FILE_STORAGE_REPORT.md`.

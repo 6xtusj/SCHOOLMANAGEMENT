@@ -30,10 +30,16 @@ DB_PATH = Path(os.environ.get('SCHOOL_DB_PATH', ROOT / 'school.db'))
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', ROOT / 'uploads'))
 SCHEMA_DIR = ROOT / 'base44' / 'entities'
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-file_storage = FileStorage(UPLOAD_DIR)
-if (os.environ.get('APP_ENV', 'development').lower() == 'production' and file_storage.mode != 's3'
+file_storage = FileStorage(
+    UPLOAD_DIR,
+    database_connect=lambda: connect_database(DB_PATH),
+    database_enabled=uses_postgres(),
+)
+if (os.environ.get('APP_ENV', 'development').lower() == 'production' and file_storage.mode != 'database'
         and os.environ.get('ALLOW_LOCAL_UPLOADS_IN_PRODUCTION', '').strip().lower() != 'true'):
-    raise RuntimeError('Production startup refused: configure private S3-compatible object storage (Cloudflare R2 supported), or explicitly allow local uploads only on a host with persistent disks.')
+    raise RuntimeError('Production startup refused: set UPLOAD_STORAGE=database to store private uploads in PostgreSQL/Neon.')
+if (os.environ.get('APP_ENV', 'development').lower() == 'production' and file_storage.mode == 'database' and not uses_postgres()):
+    raise RuntimeError('Production database file storage requires DATABASE_URL to point to PostgreSQL/Neon.')
 app = Flask(__name__, static_folder=None)
 app.config.update(SECRET_KEY=os.environ.get('SECRET_KEY', 'change-this-school-secret-before-deployment'), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=(os.environ.get('COOKIE_SECURE', 'false').lower() == 'true' or os.environ.get('APP_ENV', 'development').lower() == 'production'), PERMANENT_SESSION_LIFETIME=timedelta(hours=8), MAX_CONTENT_LENGTH=10 * 1024 * 1024)
 _configured_secret = os.environ.get('SECRET_KEY', '').strip()
@@ -1439,6 +1445,10 @@ def init_db():
         c.execute('CREATE TABLE IF NOT EXISTS auth_users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, full_name TEXT DEFAULT "", role TEXT DEFAULT "user", account_status TEXT DEFAULT "active", email_verified INTEGER NOT NULL DEFAULT 1, session_version INTEGER NOT NULL DEFAULT 0, created_date TEXT NOT NULL)')
         migrate_schema(c)
         c.execute('CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, entity TEXT NOT NULL, data TEXT NOT NULL, created_date TEXT NOT NULL, updated_date TEXT NOT NULL)')
+        file_content_type = 'BYTEA' if uses_postgres() else 'BLOB'
+        c.execute(f'CREATE TABLE IF NOT EXISTS stored_files (filename TEXT PRIMARY KEY, content {file_content_type} NOT NULL, content_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_stored_files_created ON stored_files(created_at)')
+        c.execute('INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(8,?)', (now(),))
         c.execute('CREATE TABLE IF NOT EXISTS email_provider_config (id INTEGER PRIMARY KEY CHECK(id=1), config_encrypted TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT)')
         _migrate_legacy_email_settings(c)
         c.execute('CREATE INDEX IF NOT EXISTS idx_auth_users_email_lower ON auth_users(lower(email))')

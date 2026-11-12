@@ -1,9 +1,15 @@
+"""Private upload storage backed by the application's primary database.
+
+Production deployments on ephemeral hosts should use PostgreSQL/Neon. Local
+filesystem storage remains available for local development only.
+"""
+from __future__ import annotations
+
+import hashlib
 import os
 import re
 from pathlib import Path
-
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+from typing import Callable
 
 
 class StorageError(RuntimeError):
@@ -11,100 +17,92 @@ class StorageError(RuntimeError):
 
 
 class FileStorage:
-    def __init__(self, directory, env=None, client=None):
-        self._env=env or os.environ
-        self.directory=Path(directory)
-        self.mode=self._env.get('UPLOAD_STORAGE','local').strip().lower()
-        self.bucket=self._env.get('S3_BUCKET','').strip()
-        self.prefix=self._env.get('S3_PREFIX','school-uploads').strip('/')
-        self._client=client
-        if self.mode not in ('local','s3'):
-            raise RuntimeError('UPLOAD_STORAGE must be either local or s3.')
-        if self.mode=='s3' and not all((
-            self.bucket,
-            self._env.get('S3_ACCESS_KEY_ID','').strip(),
-            self._env.get('S3_SECRET_ACCESS_KEY','').strip(),
-        )):
-            raise RuntimeError('S3 uploads require S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY.')
+    def __init__(self, directory, env=None, database_connect: Callable | None = None,
+                 database_enabled: bool = False):
+        self._env = env if env is not None else os.environ
+        self.directory = Path(directory)
+        default_mode = 'database' if self._env.get('APP_ENV', 'development').lower() == 'production' else 'local'
+        self.mode = self._env.get('UPLOAD_STORAGE', default_mode).strip().lower()
+        if self.mode in ('db', 's3'):
+            # Treat the former S3 setting as the new Neon-backed mode so an
+            # already-configured Render service does not remain stuck on boot.
+            self.mode = 'database'
+        self._database_connect = database_connect
+        self.database_enabled = database_enabled
+        if self.mode not in ('local', 'database'):
+            raise RuntimeError('UPLOAD_STORAGE must be either database or local.')
+        if self.mode == 'database' and (not self._database_connect or not self.database_enabled):
+            raise RuntimeError('Database file storage requires DATABASE_URL to point to PostgreSQL.')
+        if self.mode == 'local':
+            self.directory.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _safe_name(filename):
-        if not isinstance(filename,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,255}',filename) or filename in ('.','..'):
+        if (not isinstance(filename, str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,255}', filename)
+                or filename in ('.', '..')):
             raise ValueError('Invalid upload filename.')
         return filename
 
-    def _key(self, filename):
-        name=self._safe_name(filename)
-        return f'{self.prefix}/{name}' if self.prefix else name
-
-    def _s3(self):
-        if self._client is None:
-            endpoint=self._env.get('S3_ENDPOINT_URL','').strip() or None
-            region=self._env.get('S3_REGION','auto').strip() or 'auto'
-            try:
-                self._client=boto3.client(
-                    's3',
-                    endpoint_url=endpoint,
-                    region_name=region,
-                    aws_access_key_id=self._env['S3_ACCESS_KEY_ID'],
-                    aws_secret_access_key=self._env['S3_SECRET_ACCESS_KEY'],
-                )
-            except (BotoCoreError,ValueError) as exc:
-                raise StorageError('Could not configure external upload storage.') from exc
-        return self._client
-
     def save_bytes(self, filename, content, content_type):
-        name=self._safe_name(filename)
-        if self.mode=='local':
-            target=(self.directory/name).resolve()
-            if target.parent!=self.directory.resolve():
+        name = self._safe_name(filename)
+        if not isinstance(content, (bytes, bytearray, memoryview)):
+            raise TypeError('File content must be bytes.')
+        payload = bytes(content)
+        if self.mode == 'local':
+            target = (self.directory / name).resolve()
+            if target.parent != self.directory.resolve():
                 raise ValueError('Invalid upload filename.')
-            self.directory.mkdir(parents=True,exist_ok=True)
-            target.write_bytes(content)
+            self.directory.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
             return
+        digest = hashlib.sha256(payload).hexdigest()
         try:
-            self._s3().put_object(
-                Bucket=self.bucket,
-                Key=self._key(name),
-                Body=content,
-                ContentType=content_type or 'application/octet-stream',
-            )
-        except (BotoCoreError,ClientError) as exc:
-            raise StorageError('Could not save the uploaded file to external storage.') from exc
+            with self._database_connect() as conn:
+                conn.execute('DELETE FROM stored_files WHERE filename=?', (name,))
+                conn.execute(
+                    'INSERT INTO stored_files(filename, content, content_type, size_bytes, sha256, created_at) '
+                    'VALUES(?,?,?,?,?,?)',
+                    (name, payload, content_type or 'application/octet-stream', len(payload), digest,
+                     __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()),
+                )
+        except Exception as exc:
+            raise StorageError('Could not save the uploaded file to the PostgreSQL database.') from exc
 
     def save_file(self, upload, filename, content_type):
-        content=upload.stream.read()
+        content = upload.stream.read()
         upload.stream.seek(0)
-        self.save_bytes(filename,content,content_type)
+        self.save_bytes(filename, content, content_type)
 
     def read(self, filename):
-        name=self._safe_name(filename)
-        if self.mode=='local':
-            target=(self.directory/name).resolve()
-            if target.parent!=self.directory.resolve() or not target.is_file():
+        name = self._safe_name(filename)
+        if self.mode == 'local':
+            target = (self.directory / name).resolve()
+            if target.parent != self.directory.resolve() or not target.is_file():
                 raise FileNotFoundError(name)
             return target.read_bytes()
         try:
-            response=self._s3().get_object(Bucket=self.bucket,Key=self._key(name))
-            return response['Body'].read()
-        except ClientError as exc:
-            status=exc.response.get('ResponseMetadata',{}).get('HTTPStatusCode')
-            code=exc.response.get('Error',{}).get('Code')
-            if status==404 or code in ('NoSuchKey','NotFound'):
-                raise FileNotFoundError(name) from exc
-            raise StorageError('Could not read the uploaded file from external storage.') from exc
-        except BotoCoreError as exc:
-            raise StorageError('Could not read the uploaded file from external storage.') from exc
+            with self._database_connect() as conn:
+                row = conn.execute('SELECT content FROM stored_files WHERE filename=?', (name,)).fetchone()
+            if row is None:
+                raise FileNotFoundError(name)
+            value = row['content'] if hasattr(row, 'keys') else row[0]
+            return bytes(value)
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            raise StorageError('Could not read the uploaded file from the PostgreSQL database.') from exc
 
     def delete(self, filename):
-        name=self._safe_name(filename)
-        if self.mode=='local':
-            target=(self.directory/name).resolve()
-            if target.parent!=self.directory.resolve():
+        name = self._safe_name(filename)
+        if self.mode == 'local':
+            target = (self.directory / name).resolve()
+            if target.parent != self.directory.resolve():
                 raise ValueError('Invalid upload filename.')
             target.unlink(missing_ok=True)
             return
         try:
-            self._s3().delete_object(Bucket=self.bucket,Key=self._key(name))
-        except (BotoCoreError,ClientError) as exc:
-            raise StorageError('Could not delete the uploaded file from external storage.') from exc
+            with self._database_connect() as conn:
+                conn.execute('DELETE FROM stored_files WHERE filename=?', (name,))
+        except Exception as exc:
+            raise StorageError('Could not delete the uploaded file from the PostgreSQL database.') from exc

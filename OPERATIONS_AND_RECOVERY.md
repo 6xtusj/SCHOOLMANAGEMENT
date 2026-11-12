@@ -2,7 +2,7 @@
 
 ## Critical: Render inactivity is not a database backup
 
-Render Free services sleep after inactivity and have an ephemeral filesystem. A sleeping Flask service should not lose data stored in Neon/PostgreSQL or private R2 objects. If records disappear after the service wakes, first verify whether the deployed app is accidentally using local SQLite.
+Render Free services sleep after inactivity and have an ephemeral filesystem. A sleeping Flask service should not lose data stored in Neon/PostgreSQL, including uploaded file bytes. If records disappear after the service wakes, first verify whether the deployed app is accidentally using local SQLite.
 
 1. Open `https://YOUR-RENDER-SERVICE/healthz`.
 2. Confirm `database_engine` is `postgresql` and `database` is `ok`.
@@ -20,11 +20,9 @@ The application now refuses production startup when `DATABASE_URL` is missing or
 - Use the pooled Neon URL where available. Keep `DB_POOL_MAX` within the database/provider connection budget. Gunicorn currently runs one worker and four threads in the included Dockerfile; pool defaults are conservative.
 - A Render restart/sleep must not switch the database URL. Verify `/healthz` after every deploy.
 
-## Cloudflare R2 (portable S3 API)
+## Private upload storage in Neon
 
-Set `UPLOAD_STORAGE=s3`, `S3_BUCKET`, `S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com`, `S3_REGION=auto`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and optionally `S3_PREFIX=school-uploads`. Keep the bucket private. The app authorizes a user before serving protected documents. Do not expose keys to the browser.
-
-The same adapter supports other S3-compatible services by changing endpoint, region and credentials. The code does not require Cloudflare-specific SDK features.
+Set `UPLOAD_STORAGE=database`. The application stores file bytes and metadata in the Neon PostgreSQL `stored_files` table. No Cloudflare R2/S3 bucket, API token, storage credentials or Render disk is required. Existing authorization checks remain in the `/uploads/<filename>` route. Include the database in every backup because it now contains both school records and uploaded files.
 
 ## Backups
 
@@ -39,20 +37,6 @@ Restore only to a new empty test database first:
 ```bash
 DATABASE_URL="postgresql://...test database..." python restore_postgres.py ./backups/school_postgres_YYYYMMDDTHHMMSSZ.dump
 ```
-
-Object storage backup:
-
-```bash
-python backup_object_storage.py ./backups
-```
-
-Restore to a separate test bucket first; configure the destination bucket and matching S3 endpoint/keys, then:
-
-```bash
-python restore_object_storage.py ./backups/school_uploads_YYYYMMDDTHHMMSSZ
-```
-
-The object restore verifies SHA-256 checksums and skips existing keys by default. `RESTORE_OVERWRITE=true` explicitly permits replacement; use it only after reviewing the manifest and backing up the destination.
 
 Store backups outside the application host and outside the primary bucket/account where possible. A backup on the same Render filesystem is not a backup. Keep database and upload backups from compatible times and periodically perform a full restore drill.
 
