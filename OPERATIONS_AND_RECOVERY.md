@@ -1,36 +1,70 @@
-# Operations, portability and recovery
+# Operations, persistence and recovery
 
-## Production configuration
+## Critical: Render inactivity is not a database backup
 
-- Set `APP_ENV=production`, a stable random `SECRET_KEY` (32+ characters), and a PostgreSQL `DATABASE_URL`. Production now refuses to start with SQLite or a missing PostgreSQL URL.
-- Use `psycopg` plus `psycopg-pool`; tune `DB_POOL_MIN`/`DB_POOL_MAX` to the host's worker/thread count and the database provider's connection limit. The Render blueprint uses a conservative pool maximum of 4. Do not increase it without checking Neon limits.
-- Set `UPLOAD_STORAGE=s3`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_ENDPOINT_URL`, `S3_REGION=auto`, and `S3_PREFIX=school-uploads`. For Cloudflare R2, endpoint format is `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`; use an R2 S3 API token with only the required bucket permissions. Keep the bucket private.
-- The storage adapter uses the S3 API, not R2-specific SDK calls. Backblaze B2 and AWS S3 remain compatible by changing endpoint/region and credentials. This avoids provider lock-in.
-- Keep the same `SECRET_KEY` across restarts; it protects sessions and encrypted staff bank details. Store secrets only in the hosting secret manager or local ignored `.env`. Never place credentials in `VITE_*` variables or source control.
+Render Free services sleep after inactivity and have an ephemeral filesystem. A sleeping Flask service should not lose data stored in Neon/PostgreSQL or private R2 objects. If records disappear after the service wakes, first verify whether the deployed app is accidentally using local SQLite.
 
-## Database changes and data safety
+1. Open `https://YOUR-RENDER-SERVICE/healthz`.
+2. Confirm `database_engine` is `postgresql` and `database` is `ok`.
+3. If it says `sqlite`, stop entering data. In Render → your service → Environment, set `DATABASE_URL` to the correct Neon PostgreSQL connection string (use the Neon pooled connection string with TLS), save and redeploy.
+4. Confirm `APP_ENV=production`, `DB_POOL_MIN=1`, and a modest `DB_POOL_MAX` suitable for the host's worker/thread count.
+5. Open `/api/admin/system-storage` while signed in as Admin or Principal to see the selected engine and record counts. It never returns the database URL or password.
+6. Do not create a fresh Neon database/branch or restore over the only existing database until you have located and backed up the current data.
 
-The existing application has an additive `schema_migrations` ledger and schema-upgrade routine. It is retained to preserve existing installations. The routine still runs additive schema checks at startup; this release does not introduce Alembic or destructive table rebuilds. Before upgrading, take a provider-native PostgreSQL snapshot/export and verify a restore to a separate database. Do not point a restore command at the live database.
+The application now refuses production startup when `DATABASE_URL` is missing or invalid, unless the operator deliberately enables `ALLOW_SQLITE_IN_PRODUCTION=true`. That override is only for a single host with a genuinely persistent mounted disk (for example the included Oracle Docker volume), never Render Free.
 
-Production never silently falls back to a local SQLite file. A deliberate single-host deployment (such as the included Oracle VM profile) may explicitly set `ALLOW_SQLITE_IN_PRODUCTION=true` only when its database is on a persistent disk; that mode is not suitable for horizontally scaled hosting. Similarly, `ALLOW_LOCAL_UPLOADS_IN_PRODUCTION=true` is only for a persistent host volume. For portable/multi-instance deployment, use PostgreSQL + private S3-compatible storage. Existing SQLite records are not automatically copied to PostgreSQL: use a separately planned, verified migration if you have records that must be moved.
+## Neon/PostgreSQL configuration
+
+- Use separate development and production Neon databases.
+- Set `DATABASE_URL` only in the server environment; never put it in Vite variables, source control or screenshots.
+- Use the pooled Neon URL where available. Keep `DB_POOL_MAX` within the database/provider connection budget. Gunicorn currently runs one worker and four threads in the included Dockerfile; pool defaults are conservative.
+- A Render restart/sleep must not switch the database URL. Verify `/healthz` after every deploy.
+
+## Cloudflare R2 (portable S3 API)
+
+Set `UPLOAD_STORAGE=s3`, `S3_BUCKET`, `S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com`, `S3_REGION=auto`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and optionally `S3_PREFIX=school-uploads`. Keep the bucket private. The app authorizes a user before serving protected documents. Do not expose keys to the browser.
+
+The same adapter supports other S3-compatible services by changing endpoint, region and credentials. The code does not require Cloudflare-specific SDK features.
 
 ## Backups
 
-- SQLite development: `python backup_school.py` captures a consistent SQLite snapshot and local `uploads/` files.
-- PostgreSQL: `python backup_postgres.py` uses `pg_dump` custom format. It does not modify the database. Install PostgreSQL client tools, set `DATABASE_URL`, and store the resulting dump off-host.
-- Object storage: enable bucket versioning/replication or scheduled export using your provider's controls. Database backups do not include uploaded objects.
-- Restore to an isolated database and isolated bucket/prefix first. Verify student, parent, staff, fee, payment, result, attendance, report archive and document records before planning production recovery. Preserve the original backup and live data.
+Database backup (PostgreSQL client tools required):
 
-## Health, logs and capacity
+```bash
+python backup_postgres.py ./backups
+```
 
-`/healthz` now checks a real database query and returns HTTP 503 when the database is unavailable. Application logs should be collected by the host and retained outside ephemeral containers. Configure external uptime/error monitoring.
+Restore only to a new empty test database first:
 
-The general `/api/entities/<name>` endpoint retains its existing array response for compatibility and still performs permission filtering in application code. It retains its existing default response cap of 1,000 (maximum 5,000), but it is not a complete server-side pagination implementation for every entity. Portal Accounts already has dedicated server-side search/filter/pagination. Large operational datasets require follow-up endpoint-specific pagination and query plans before claiming a 5,000+ student production capacity.
+```bash
+DATABASE_URL="postgresql://...test database..." python restore_postgres.py ./backups/school_postgres_YYYYMMDDTHHMMSSZ.dump
+```
 
-## Background work and concurrency
+Object storage backup:
 
-The application currently handles requests synchronously. This release uses a bounded database connection pool but does not add Redis/Celery or an unconfigured queue service. Long-running email, bulk import/export and report-generation work should be moved to a managed worker when workload and host are selected; do not add a queue dependency without provisioning its durable broker and worker.
+```bash
+python backup_object_storage.py ./backups
+```
 
-## Deployment portability
+Restore to a separate test bucket first; configure the destination bucket and matching S3 endpoint/keys, then:
 
-The Docker image remains the primary portable deployment unit. Any Docker-capable Python host can run it with PostgreSQL and an S3-compatible bucket. Set the host's port, health check `/healthz`, database URL, secrets and bucket credentials. The Render blueprint is an example, not a required runtime dependency.
+```bash
+python restore_object_storage.py ./backups/school_uploads_YYYYMMDDTHHMMSSZ
+```
+
+The object restore verifies SHA-256 checksums and skips existing keys by default. `RESTORE_OVERWRITE=true` explicitly permits replacement; use it only after reviewing the manifest and backing up the destination.
+
+Store backups outside the application host and outside the primary bucket/account where possible. A backup on the same Render filesystem is not a backup. Keep database and upload backups from compatible times and periodically perform a full restore drill.
+
+## Single-host SQLite option
+
+The included Oracle Docker Compose setup mounts `/var/data` as a persistent Docker volume. SQLite is permitted only when the operator explicitly sets `ALLOW_SQLITE_IN_PRODUCTION=true` and protects that volume with off-host backups. A Docker volume is persistent storage, not high availability and not a substitute for backups.
+
+## Incident response if records appear missing
+
+- Do not create new records or change database environment variables repeatedly.
+- Capture the current `/healthz` response and Render deploy logs (redact secrets).
+- Check whether `database_engine` says `sqlite` or `postgresql`.
+- In Neon, inspect the project, branch, database and restore/backup history. Verify the exact database name/branch in the connection string without sharing credentials.
+- Search the local development `school.db` and previous backup archives; never overwrite them.
+- Restore a candidate backup into a separate database, compare record counts and sample academic/finance records, and only then plan a controlled cutover.

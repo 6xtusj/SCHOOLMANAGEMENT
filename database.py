@@ -212,7 +212,10 @@ class PostgresConnection:
             else:
                 self._connection.rollback()
         finally:
-            self._connection.close()
+            # Return pooled connections to psycopg_pool. Closing the raw
+            # connection here leaks a pool checkout on every request and can
+            # exhaust the pool after repeated page/API activity.
+            self.close()
         return False
 
 

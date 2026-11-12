@@ -805,6 +805,7 @@ def migrate_schema(c):
     c.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(1,?)", (now(),))
     c.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(2,?)", (now(),))
     c.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(3,?)", (now(),))
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(7,?)", (now(),))
 
 
 def _bank_cipher():
@@ -1452,6 +1453,11 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_records_payment_student ON records(json_extract(data,'$.student_id')) WHERE entity='Payment'")
         c.execute("CREATE INDEX IF NOT EXISTS idx_records_request_status ON records(json_extract(data,'$.status')) WHERE entity='PortalRequest'")
         c.execute("CREATE INDEX IF NOT EXISTS idx_records_staff_email ON records(lower(json_extract(data,'$.email'))) WHERE entity='StaffProfile'")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_records_attendance_student_date ON records(json_extract(data,'$.student_id'),json_extract(data,'$.date')) WHERE entity='Attendance'")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_records_result_student_term ON records(json_extract(data,'$.student_id'),json_extract(data,'$.session'),json_extract(data,'$.term')) WHERE entity='Result'")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_records_payment_fee_term ON records(json_extract(data,'$.fee_id'),json_extract(data,'$.session'),json_extract(data,'$.term')) WHERE entity='Payment'")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_records_timetable_class ON records(json_extract(data,'$.class_arm_id'),json_extract(data,'$.weekday')) WHERE entity='TimetableEntry'")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_records_updated ON records(entity,updated_date)")
         c.execute('CREATE TABLE IF NOT EXISTS reset_tokens (token TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at TEXT NOT NULL)')
         c.execute('CREATE TABLE IF NOT EXISTS invite_tokens (token TEXT PRIMARY KEY, record_id TEXT NOT NULL, email TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)')
         c.execute('CREATE TABLE IF NOT EXISTS verification_codes (email TEXT PRIMARY KEY, code TEXT NOT NULL, expires_at TEXT NOT NULL)')
@@ -2547,7 +2553,65 @@ def admin_portal_accounts():
 @app.get('/api/entities/<name>')
 @login_required
 def entity_list(name):
-    name=clean_entity(name); user=current_user(); params=request.args; where=json.loads(params.get('where','{}'))
+    name=clean_entity(name); user=current_user(); params=request.args
+    try:
+        where=json.loads(params.get('where','{}'))
+        if not isinstance(where,dict): raise ValueError
+    except (TypeError,ValueError):
+        return jsonify(error='The where filter must be a JSON object.'),400
+
+    # Admin/Principal directory views can use SQL-side filtering and pagination.
+    # Other roles retain the established permission-filtered path because their
+    # row-level visibility rules differ by entity and record.
+    if user.get('role') in ('admin','principal'):
+        clauses=['entity=?']; values=[name]
+        for field,value in where.items():
+            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}',str(field)):
+                return jsonify(error='Invalid filter field.'),400
+            expression=f"CAST(json_extract(data,'$.{field}') AS TEXT)"
+            if value is None:
+                clauses.append(f'{expression} IS NULL')
+            else:
+                clauses.append(f'{expression}=?')
+                if isinstance(value,bool):
+                    values.append(('true' if value else 'false') if uses_postgres() else ('1' if value else '0'))
+                elif isinstance(value,(dict,list)):
+                    values.append(json.dumps(value,separators=(',',':')))
+                else:
+                    values.append(str(value))
+        where_sql=' AND '.join(clauses)
+        sort=params.get('sort',''); reverse=sort.startswith('-'); key=sort[1:] if reverse else sort
+        order_sql=''
+        if key:
+            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}',key):
+                return jsonify(error='Invalid sort field.'),400
+            order_sql=f" ORDER BY json_extract(data,'$.{key}') {'DESC' if reverse else 'ASC'}"
+        try:
+            paged=('page' in params or 'per_page' in params or 'offset' in params)
+            if paged:
+                page=max(1,int(params.get('page','1')))
+                per_page=max(1,min(int(params.get('per_page',params.get('limit','50'))),200))
+                offset=(page-1)*per_page
+            else:
+                page=1; per_page=max(1,min(int(params.get('limit',1000)),5000)); offset=max(0,int(params.get('offset','0')))
+        except (TypeError,ValueError):
+            return jsonify(error='Invalid pagination values.'),400
+        with db() as c:
+            total=int(c.execute(f'SELECT COUNT(*) FROM records WHERE {where_sql}',values).fetchone()[0])
+            rows=c.execute(f'SELECT * FROM records WHERE {where_sql}{order_sql} LIMIT ? OFFSET ?',values+[per_page,offset]).fetchall()
+        out=[]
+        for row in rows:
+            d=record_out(row)
+            if name=='User':
+                if user['role']!='admin': continue
+                d.pop('password_hash',None)
+            out.append(d)
+        response=jsonify(out)
+        response.headers['X-Total-Count']=str(total)
+        response.headers['X-Page']=str(page)
+        response.headers['X-Per-Page']=str(per_page)
+        return response
+
     with db() as c: rows=c.execute('SELECT * FROM records WHERE entity=?',(name,)).fetchall()
     out=[]
     for row in rows:
@@ -3429,7 +3493,35 @@ def health_check():
     except Exception:
         app.logger.exception('Health check could not access the school database')
         return jsonify(status='unavailable', database='unavailable'), 503
-    return jsonify(status='ok', database='ok', storage=file_storage.mode)
+    return jsonify(
+        status='ok',
+        database='ok',
+        database_engine='postgresql' if uses_postgres() else 'sqlite',
+        storage=file_storage.mode,
+        # SQLite on ephemeral hosting is not durable across instance replacement.
+        durable_database=bool(uses_postgres() or os.environ.get('ALLOW_SQLITE_IN_PRODUCTION', '').strip().lower() == 'true'),
+    )
+
+
+@app.get('/api/admin/system-storage')
+@login_required
+def admin_system_storage():
+    user=current_user()
+    if user.get('role') not in ('admin','principal'):
+        return jsonify(error='You do not have permission to view system storage diagnostics.'),403
+    try:
+        with db() as c:
+            counts=c.execute('SELECT entity,COUNT(*) AS total FROM records GROUP BY entity ORDER BY entity').fetchall()
+        return jsonify(
+            database_engine='postgresql' if uses_postgres() else 'sqlite',
+            durable_database=bool(uses_postgres() or os.environ.get('ALLOW_SQLITE_IN_PRODUCTION','').strip().lower() == 'true'),
+            upload_storage=file_storage.mode,
+            record_counts={row['entity']:int(row['total']) for row in counts},
+            guidance=(None if uses_postgres() else 'This instance is using SQLite. On Render Free, its local filesystem is ephemeral; configure DATABASE_URL to a persistent managed PostgreSQL database such as Neon and redeploy before entering real records.'),
+        )
+    except Exception:
+        app.logger.exception('System storage diagnostics failed')
+        return jsonify(error='Storage diagnostics are temporarily unavailable.'),503
 
 
 @app.get('/api/security/csrf')
