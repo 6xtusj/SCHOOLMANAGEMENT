@@ -12,7 +12,7 @@ if not app.uses_postgres():
 
 record_id = str(uuid.uuid4())
 verification_email = f'{record_id}@school.test'
-migration_version = int(record_id.replace('-', '')[:8], 16)
+migration_version = int(record_id.replace('-', '')[:7], 16)
 
 with app.db() as connection:
     connection.execute(
