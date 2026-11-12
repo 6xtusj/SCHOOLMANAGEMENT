@@ -1,10 +1,10 @@
-# Nigerian School Management System — V8.0 Flask Release
+# Nigerian School Management System — V9.0 Flask Release
 
 This package keeps the supplied React/Vite application as its frontend and runs the API and authentication through Flask. Set `DATABASE_URL` to use PostgreSQL (including Neon); if it is blank, the app uses SQLite for local fallback and tests. The original page/component files, layout, navigation and styling are retained; `src/api/base44Client.js` is now a compatibility adapter that sends the existing page calls to `/api`.
 
 ## PostgreSQL and Neon database setup
 
-The app creates its tables and indexes when it starts. A PostgreSQL URL takes precedence over `SCHOOL_DB_PATH`; without `DATABASE_URL`, local development uses SQLite. A new PostgreSQL database starts with the application's schema and initial administrator, not the contents of an existing SQLite database. Existing SQLite records are not automatically migrated.
+The app applies its existing additive schema upgrades and indexes when it starts. Production now requires PostgreSQL and refuses a silent SQLite fallback. A PostgreSQL URL takes precedence over `SCHOOL_DB_PATH`; without `DATABASE_URL`, local development uses SQLite. A new PostgreSQL database starts with the application's schema and initial administrator, not the contents of an existing SQLite database. Existing SQLite records are not automatically migrated.
 
 Use two separate Neon projects or databases:
 
@@ -15,7 +15,7 @@ Neon URLs should use TLS, for example `postgresql://USER:PASSWORD@HOST/DBNAME?ss
 
 For local SQLite-only tests, leave `DATABASE_URL` blank. To check a Neon development database locally, set its URL in `.env` and restart Flask. The app does not import records from SQLite; use only the fresh database as requested, and keep the old database untouched until you confirm the new deployment.
 
-Uploads can use local files in development or a private S3-compatible bucket in production. For Render Free, configure `UPLOAD_STORAGE=s3`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_ENDPOINT_URL`; `S3_REGION` and `S3_PREFIX` are also configurable. Cloudflare R2, Backblaze B2, or AWS S3 can be used. Keep the bucket private: the Flask route checks the user's authorization before reading an object. Do not put bucket credentials in React or `VITE_*` variables.
+Uploads can use local files in development or a private S3-compatible bucket in production. For Render Free, configure `UPLOAD_STORAGE=s3`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_ENDPOINT_URL`; `S3_REGION` and `S3_PREFIX` are also configurable. Cloudflare R2 is the recommended initial provider; Backblaze B2 and AWS S3 can also be used because the adapter remains S3-compatible and provider-neutral. Keep the bucket private: the Flask route checks the user's authorization before reading an object. Do not put bucket credentials in React or `VITE_*` variables.
 
 ## GitHub and online hosting
 
@@ -30,7 +30,7 @@ For a Render test deployment:
 5. After Render assigns the URL, set `PUBLIC_BASE_URL` to that HTTPS origin. Configure a provider in Admin → School Settings → School email before inviting users; on Render Free use Brevo or Resend API, not SMTP. Add Paystack secrets only if online payments are enabled. Never place secrets in `VITE_*` variables, GitHub source, or frontend files.
 6. Verify the host's `/healthz` endpoint, sign in with the first admin, configure school identity and email, send a test email, and test the main workflows with demo data before any real records are entered. The Portal Accounts directory lists invited or registered login accounts; adding a student or staff profile by itself does not create login credentials.
 
-The Render Free service can sleep, but PostgreSQL and bucket objects live outside its temporary filesystem. Configure separate database and object-storage backups and periodically test a restore before entering real school data; the application does not claim that a live Neon database or an S3 bucket is itself a backup. GitHub Actions runs the SQLite regression suite, SQL translation tests, a PostgreSQL service smoke test, frontend lint, and Vite build on pushes and pull requests. See [Render Blueprint configuration](https://render.com/docs/blueprint-spec) and [Render free instances](https://render.com/docs/free).
+The Render Free service can sleep, but PostgreSQL and bucket objects live outside its temporary filesystem. Configure separate database and object-storage backups and periodically test a restore before entering real school data; the application does not claim that a live Neon database or an S3 bucket is itself a backup. GitHub Actions runs the SQLite regression suite, SQL translation tests, a PostgreSQL service smoke test, frontend lint, and Vite build on pushes and pull requests. See `OPERATIONS_AND_RECOVERY.md` for PostgreSQL pooling, R2 configuration, provider portability, backup/restore and current scaling limitations. For PostgreSQL backups use `python backup_postgres.py` with `pg_dump` installed. See [Render Blueprint configuration](https://render.com/docs/blueprint-spec) and [Render free instances](https://render.com/docs/free).
 
 ### Oracle Cloud Always Free VM
 

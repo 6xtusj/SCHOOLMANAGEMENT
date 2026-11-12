@@ -54,6 +54,21 @@ class FileStorageTests(unittest.TestCase):
             storage.delete('random-id.pdf')
             self.assertNotIn(key,client.objects)
 
+
+    def test_r2_uses_the_same_s3_compatible_adapter(self):
+        client=FakeS3()
+        env={
+            'UPLOAD_STORAGE':'s3',
+            'S3_BUCKET':'school-private',
+            'S3_ENDPOINT_URL':'https://account-id.r2.cloudflarestorage.com',
+            'S3_REGION':'auto',
+            'S3_ACCESS_KEY_ID':'r2-access',
+            'S3_SECRET_ACCESS_KEY':'r2-secret',
+        }
+        storage=FileStorage('.',env=env,client=client)
+        storage.save_bytes('r2-check.pdf',b'%PDF','application/pdf')
+        self.assertEqual(storage.read('r2-check.pdf'),b'%PDF')
+
     def test_s3_storage_requires_explicit_credentials(self):
         with self.assertRaisesRegex(RuntimeError,'S3_BUCKET'):
             FileStorage('.',env={'UPLOAD_STORAGE':'s3'})

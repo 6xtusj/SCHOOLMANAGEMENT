@@ -31,6 +31,9 @@ UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', ROOT / 'uploads'))
 SCHEMA_DIR = ROOT / 'base44' / 'entities'
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 file_storage = FileStorage(UPLOAD_DIR)
+if (os.environ.get('APP_ENV', 'development').lower() == 'production' and file_storage.mode != 's3'
+        and os.environ.get('ALLOW_LOCAL_UPLOADS_IN_PRODUCTION', '').strip().lower() != 'true'):
+    raise RuntimeError('Production startup refused: configure private S3-compatible object storage (Cloudflare R2 supported), or explicitly allow local uploads only on a host with persistent disks.')
 app = Flask(__name__, static_folder=None)
 app.config.update(SECRET_KEY=os.environ.get('SECRET_KEY', 'change-this-school-secret-before-deployment'), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=(os.environ.get('COOKIE_SECURE', 'false').lower() == 'true' or os.environ.get('APP_ENV', 'development').lower() == 'production'), PERMANENT_SESSION_LIFETIME=timedelta(hours=8), MAX_CONTENT_LENGTH=10 * 1024 * 1024)
 _configured_secret = os.environ.get('SECRET_KEY', '').strip()
@@ -2557,7 +2560,7 @@ def entity_list(name):
     sort=params.get('sort',''); reverse=sort.startswith('-'); key=sort[1:] if reverse else sort
     if key: out.sort(key=lambda x:(x.get(key) is None, str(x.get(key,'')).lower()), reverse=reverse)
     try: limit=max(1,min(int(params.get('limit',1000)),5000))
-    except ValueError: limit=1000
+    except (TypeError,ValueError): limit=1000
     return jsonify(out[:limit])
 
 @app.post('/api/entities/<name>/bulk')
@@ -3423,7 +3426,7 @@ def health_check():
     try:
         with db() as c:
             c.execute('SELECT 1').fetchone()
-    except database_errors():
+    except Exception:
         app.logger.exception('Health check could not access the school database')
         return jsonify(status='unavailable'), 503
     return jsonify(status='ok')

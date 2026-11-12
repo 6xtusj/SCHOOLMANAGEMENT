@@ -3,5 +3,6 @@ cryptography>=42.0,<47.0
 python-dotenv>=1.0,<2.0
 gunicorn>=22.0,<24.0; platform_system != "Windows"
 psycopg[binary]>=3.2,<4.0
+psycopg-pool>=3.2,<4.0
 Pillow>=11.0,<13.0
 boto3>=1.35,<2.0

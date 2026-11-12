@@ -15,10 +15,18 @@ services:
         generateValue: true
       - key: DATABASE_URL
         sync: false
+      - key: DB_POOL_MIN
+        value: 1
+      - key: DB_POOL_MAX
+        value: 4
+      - key: DB_POOL_TIMEOUT
+        value: 10
       - key: S3_BUCKET
         sync: false
       - key: S3_ENDPOINT_URL
         sync: false
+      - key: S3_PREFIX
+        value: school-uploads
       - key: S3_REGION
         value: auto
       - key: S3_ACCESS_KEY_ID

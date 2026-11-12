@@ -5,20 +5,59 @@ from pathlib import Path
 
 
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
+APP_ENV = os.environ.get('APP_ENV', 'development').strip().lower()
+_is_postgres_url = DATABASE_URL.lower().startswith(('postgres://', 'postgresql://', 'postgresql+psycopg://'))
+_CONNECTION_URL = DATABASE_URL.replace('postgresql+psycopg://', 'postgresql://', 1) if DATABASE_URL.lower().startswith('postgresql+psycopg://') else DATABASE_URL
+if APP_ENV == 'production' and not _is_postgres_url and os.environ.get('ALLOW_SQLITE_IN_PRODUCTION', '').strip().lower() != 'true':
+    raise RuntimeError('Production startup refused: DATABASE_URL must point to PostgreSQL. For a deliberately single-host SQLite deployment only, set ALLOW_SQLITE_IN_PRODUCTION=true and use persistent storage.')
+if DATABASE_URL and not _is_postgres_url:
+    raise RuntimeError('DATABASE_URL must be a PostgreSQL URL; remove it to use SQLite in development.')
 _psycopg = None
+_pool = None
+_pool_lock = None
 
 try:
-    if DATABASE_URL.startswith(('postgres://', 'postgresql://')):
+    if _is_postgres_url:
         import psycopg
-
+        from psycopg_pool import ConnectionPool
+        from threading import Lock
         _psycopg = psycopg
-except ImportError:
-    if DATABASE_URL.startswith(('postgres://', 'postgresql://')):
-        raise RuntimeError('DATABASE_URL is PostgreSQL, but psycopg is not installed.')
+        _pool_lock = Lock()
+except ImportError as exc:
+    if _is_postgres_url:
+        raise RuntimeError('PostgreSQL support requires psycopg and psycopg-pool. Install requirements.txt.') from exc
 
 
 def uses_postgres():
-    return DATABASE_URL.startswith(('postgres://', 'postgresql://'))
+    return _is_postgres_url
+
+
+def close_pool():
+    global _pool
+    if _pool is not None:
+        _pool.close()
+        _pool = None
+
+
+def _get_pool():
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                minimum = max(1, int(os.environ.get('DB_POOL_MIN', '1')))
+                maximum = max(minimum, int(os.environ.get('DB_POOL_MAX', '8')))
+                _pool = ConnectionPool(
+                    conninfo=_CONNECTION_URL,
+                    min_size=minimum,
+                    max_size=maximum,
+                    timeout=float(os.environ.get('DB_POOL_TIMEOUT', '10')),
+                    max_idle=float(os.environ.get('DB_POOL_MAX_IDLE', '300')),
+                    reconnect_timeout=float(os.environ.get('DB_POOL_RECONNECT_TIMEOUT', '30')),
+                    kwargs={'connect_timeout': int(os.environ.get('DB_CONNECT_TIMEOUT', '10')),
+                            'row_factory': _hybrid_row_factory},
+                    open=True,
+                )
+    return _pool
 
 
 def database_errors():
@@ -139,14 +178,17 @@ def translate_postgres_query(query):
 
 
 class PostgresConnection:
-    def __init__(self, connection):
+    def __init__(self, connection, release=None):
         self._connection = connection
+        self._release = release
+        self._closed = False
 
     def execute(self, query, parameters=()):
         translated = translate_postgres_query(query)
         if isinstance(translated, tuple):
             query, extra_parameters = translated
-            parameters = extra_parameters
+            if extra_parameters is not None:
+                parameters = extra_parameters
         else:
             query = translated
         return self._connection.execute(query, parameters, prepare=False)
@@ -155,7 +197,13 @@ class PostgresConnection:
         return self
 
     def close(self):
-        self._connection.close()
+        if self._closed:
+            return
+        self._closed = True
+        if self._release:
+            self._release(self._connection)
+        else:
+            self._connection.close()
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
@@ -164,7 +212,7 @@ class PostgresConnection:
             else:
                 self._connection.rollback()
         finally:
-            self._connection.close()
+            self.close()
         return False
 
 
@@ -186,9 +234,6 @@ def connect(database_path):
 
     if _psycopg is None:
         raise RuntimeError('PostgreSQL support requires psycopg. Install dependencies from requirements.txt.')
-    connection = _psycopg.connect(
-        DATABASE_URL,
-        connect_timeout=10,
-        row_factory=_hybrid_row_factory,
-    )
-    return PostgresConnection(connection)
+    pool = _get_pool()
+    connection = pool.getconn(timeout=float(os.environ.get('DB_POOL_TIMEOUT', '10')))
+    return PostgresConnection(connection, release=pool.putconn)
