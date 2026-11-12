@@ -72,5 +72,9 @@ with app.db() as connection:
     connection.execute('DELETE FROM verification_codes WHERE email=?', (verification_email,))
 
 response = app.app.test_client().get('/healthz')
-assert response.status_code == 200 and response.get_json() == {'status': 'ok'}
+health = response.get_json()
+assert response.status_code == 200 and health['status'] == 'ok'
+assert health['database'] == 'ok'
+assert health['database_engine'] == 'postgresql'
+assert health['durable_database'] is True
 print('PostgreSQL schema, query compatibility, conflict handling, and health check passed.')
