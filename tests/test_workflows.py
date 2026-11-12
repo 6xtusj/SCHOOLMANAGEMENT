@@ -572,7 +572,13 @@ class WorkflowTests(unittest.TestCase):
     def test_health_endpoint_checks_database(self):
         response = self.client.get('/healthz')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {'status': 'ok'})
+        self.assertEqual(response.get_json(), {
+            'status': 'ok',
+            'database': 'ok',
+            'database_engine': 'sqlite',
+            'storage': 'local',
+            'durable_database': False,
+        })
 
     def test_bursary_can_send_detailed_fee_reminders(self):
         self.add_account('bursar@school.test', 'bursar')
