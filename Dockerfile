@@ -1,4 +1,6 @@
-FROM node:22-alpine AS frontend
+FROM node:24-alpine AS frontend
+# Match the successful local npm environment (Node 24.22.1 / npm 11.19.1).
+RUN npm install --global npm@11.19.1
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

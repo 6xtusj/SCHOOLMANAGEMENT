@@ -69,7 +69,7 @@
     "react-hot-toast": "^2.6.0",
     "react-leaflet": "^4.2.1",
     "react-markdown": "^9.0.1",
-    "react-quill-new": "^3.8.3",
+    "react-quill-new": "^3.7.0",
     "react-resizable-panels": "^2.1.7",
     "react-router-dom": "^7.18.4",
     "recharts": "^2.15.4",
@@ -78,7 +78,7 @@
     "tailwindcss-animate": "^1.0.7",
     "three": "^0.171.0",
     "vaul": "^1.1.2",
-    "zod": "^3.24.2"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.19.0",
