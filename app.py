@@ -1501,6 +1501,50 @@ def init_db():
         production = os.environ.get('APP_ENV', 'development').lower() == 'production'
         bootstrap_email = str(os.environ.get('INITIAL_ADMIN_EMAIL') or '').strip().lower() if production else 'admin@school.local'
         bootstrap_password = os.environ.get('INITIAL_ADMIN_PASSWORD') if production else 'Admin123!'
+        legacy_admin = c.execute(
+            "SELECT id,email,password_hash,role,account_status FROM auth_users WHERE lower(email)='admin@school.local'"
+        ).fetchone() if production else None
+        legacy_password_active = bool(
+            legacy_admin and check_password_hash(legacy_admin['password_hash'], 'Admin123!')
+        )
+        if production and legacy_password_active:
+            # Neon may already contain real school records. Permit a narrowly
+            # scoped, one-time password rotation of the existing legacy admin;
+            # never reset/reseed records or silently create a second owner.
+            if os.environ.get('ROTATE_LEGACY_ADMIN_PASSWORD', '').strip().lower() != 'true':
+                raise RuntimeError(
+                    'Production startup refused: the existing admin@school.local account still uses the default password. '
+                    'For a one-time secure rotation, set ROTATE_LEGACY_ADMIN_PASSWORD=true and set '
+                    'INITIAL_ADMIN_EMAIL=admin@school.local plus a new strong INITIAL_ADMIN_PASSWORD in the hosting environment.'
+                )
+            if legacy_admin['role'] != 'admin' or legacy_admin['account_status'] != 'active':
+                raise RuntimeError(
+                    'Production startup refused: the legacy administrator account is not active with the Admin role. '
+                    'Review the existing Neon account before attempting password rotation.'
+                )
+            configured_email = str(os.environ.get('INITIAL_ADMIN_EMAIL') or '').strip().lower()
+            if configured_email != 'admin@school.local':
+                raise RuntimeError(
+                    'Production startup refused: during legacy administrator rotation, INITIAL_ADMIN_EMAIL must be '
+                    'admin@school.local. This prevents creating a second administrator or changing the existing owner identity.'
+                )
+            if not bootstrap_password or len(bootstrap_password) < 16 or password_policy_error(bootstrap_password):
+                raise RuntimeError(
+                    'Production startup refused: set INITIAL_ADMIN_PASSWORD to a new unique password of at least '
+                    '16 characters containing uppercase and lowercase letters, a number, and a symbol.'
+                )
+            if check_password_hash(legacy_admin['password_hash'], bootstrap_password):
+                raise RuntimeError(
+                    'Production startup refused: INITIAL_ADMIN_PASSWORD must differ from the active default password.'
+                )
+            c.execute(
+                'UPDATE auth_users SET password_hash=?,session_version=session_version+1 WHERE id=?',
+                (generate_password_hash(bootstrap_password), legacy_admin['id']),
+            )
+            bootstrap_email = 'admin@school.local'
+            app.logger.warning(
+                'Completed one-time password rotation for the existing legacy administrator; no school records were reset.'
+            )
         if production and not bootstrap_email:
             existing_admin = c.execute("SELECT id,email,password_hash FROM auth_users WHERE role='admin' ORDER BY created_date LIMIT 1").fetchone()
             if existing_admin:
@@ -1508,9 +1552,11 @@ def init_db():
             else:
                 bootstrap_email = ''
         exists = c.execute('SELECT id,password_hash FROM auth_users WHERE lower(email)=?', (bootstrap_email,)).fetchone() if bootstrap_email else None
-        legacy_admin = c.execute("SELECT password_hash FROM auth_users WHERE lower(email)='admin@school.local'").fetchone() if production else None
-        if legacy_admin and check_password_hash(legacy_admin['password_hash'], 'Admin123!'):
-            raise RuntimeError('Production startup refused: the default local administrator password is still active. Change it locally before deployment.')
+        if production and not exists:
+            # Re-check the legacy guard before any bootstrap account creation.
+            legacy_admin = c.execute("SELECT password_hash FROM auth_users WHERE lower(email)='admin@school.local'").fetchone()
+            if legacy_admin and check_password_hash(legacy_admin['password_hash'], 'Admin123!'):
+                raise RuntimeError('Production startup refused: the default local administrator password is still active.')
         if production and not exists:
             if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', bootstrap_email):
                 raise RuntimeError('Production startup refused: set INITIAL_ADMIN_EMAIL to a valid administrator email for the first run.')

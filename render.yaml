@@ -25,3 +25,5 @@ services:
         sync: false
       - key: INITIAL_ADMIN_PASSWORD
         sync: false
+      - key: ROTATE_LEGACY_ADMIN_PASSWORD
+        sync: false
