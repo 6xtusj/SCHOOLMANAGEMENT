@@ -4,6 +4,8 @@ import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { Link } from 'react-router-dom';
 import AppSidebar from '@/components/AppSidebar';
+import NotificationBell from '@/components/NotificationBell';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { base44 } from '@/api/base44Client';
 import { getSchoolSettings, subscribeSettings } from '@/lib/schoolSettings';
 import { useAuth } from '@/lib/AuthContext';
@@ -15,11 +17,12 @@ function applyTheme(theme) {
 
 export default function AppShell({ role, children }) {
   const { user } = useAuth();
-  const portalRole = user?.role === 'principal' ? 'principal' : role;
+  const portalRole = user?.role === 'principal' ? 'principal' : (user?.role && user.role !== 'admin' ? user.role : role);
   const [open, setOpen] = useState(false);
   const [theme, setTheme] = useState('dark');
   const [school, setSchool] = useState('School');
   const [logo, setLogo] = useState('');
+  const [activePrivileges, setActivePrivileges] = useState(user?.active_privileges || []);
 
   useEffect(() => {
     const saved = localStorage.getItem('school-theme') || 'dark';
@@ -36,8 +39,30 @@ export default function AppShell({ role, children }) {
   }, []);
 
   useEffect(() => {
+    setActivePrivileges(user?.active_privileges || []);
+    if (!user?.id) return;
+    fetch('/api/staff/my-privileges', { credentials: 'include' })
+      .then((response) => response.ok ? response.json() : [])
+      .then((rows) => setActivePrivileges(Array.isArray(rows) ? rows.map((row) => row.privilege_key) : []))
+      .catch(() => setActivePrivileges(user?.active_privileges || []));
+  }, [user?.id]);
+
+  useEffect(() => {
     document.title = school || 'School Portal';
   }, [school]);
+
+  const portalPath = (roleName) => ({ admin: '/admin', principal: '/principal', teacher: '/teacher', bursar: '/bursary', librarian: '/library', parent: '/parent', student: '/student' }[roleName] || '/workspace');
+
+  const switchPortal = async (nextRole) => {
+    if (!nextRole || nextRole === user?.role) return;
+    try {
+      const token = document.cookie.split('; ').find((part) => part.startsWith('school_csrf_token='))?.slice('school_csrf_token='.length) || '';
+      const response = await fetch('/api/auth/portal-role', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': token }, body: JSON.stringify({ role: nextRole }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Could not switch portal.');
+      window.location.assign(portalPath(nextRole));
+    } catch (error) { window.alert(error.message || 'Could not switch portal.'); }
+  };
 
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark';
@@ -48,7 +73,7 @@ export default function AppShell({ role, children }) {
   return (
     <div className="min-h-[100dvh] bg-background">
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 border-r border-sidebar-border lg:block">
-        <AppSidebar role={portalRole} schoolName={school} schoolLogo={logo} />
+        <AppSidebar role={portalRole} schoolName={school} schoolLogo={logo} privileges={activePrivileges} isPrimaryAdmin={!!user?.is_primary_admin} restrictedAdmin={!!user?.is_restricted_admin} />
       </aside>
 
       <div className="lg:pl-64">
@@ -61,7 +86,7 @@ export default function AppShell({ role, children }) {
                 </Button>
               </SheetTrigger>
               <SheetContent side="left" className="w-64 border-r border-sidebar-border bg-sidebar p-0">
-                <AppSidebar role={portalRole} schoolName={school} schoolLogo={logo} onNavigate={() => setOpen(false)} />
+                <AppSidebar role={portalRole} schoolName={school} schoolLogo={logo} privileges={activePrivileges} isPrimaryAdmin={!!user?.is_primary_admin} restrictedAdmin={!!user?.is_restricted_admin} onNavigate={() => setOpen(false)} />
               </SheetContent>
             </Sheet>
             <span className="hidden min-w-0 truncate font-heading text-sm font-medium text-muted-foreground sm:block">
@@ -70,6 +95,8 @@ export default function AppShell({ role, children }) {
           </div>
 
           <div className="flex items-center gap-1">
+            {(user?.available_portal_roles || []).length > 1 && <Select value={user?.role || role} onValueChange={switchPortal}><SelectTrigger className="h-9 w-[118px] text-xs" aria-label="Switch portal"><SelectValue placeholder="Portal" /></SelectTrigger><SelectContent>{user.available_portal_roles.map((portal) => <SelectItem key={portal} value={portal} className="capitalize">{portal} portal</SelectItem>)}</SelectContent></Select>}
+            <NotificationBell />
             <Button asChild variant="ghost" size="sm" className="h-11 w-11 px-0 sm:h-8 sm:w-auto sm:px-3">
               <Link to="/workspace" aria-label="Dashboard"><LayoutDashboard className="h-4 w-4 sm:mr-2" /><span className="hidden sm:inline">Dashboard</span></Link>
             </Button>

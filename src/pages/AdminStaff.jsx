@@ -7,8 +7,11 @@ import AssignmentsPanel from '@/components/admin/AssignmentsPanel';
 import PortalAccounts from '@/components/admin/PortalAccounts';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { items, sortArms } from '@/lib/school';
+import { useAuth } from '@/lib/AuthContext';
+import StaffPrivilegesPanel from '@/components/admin/StaffPrivilegesPanel';
 
 export default function AdminStaff() {
+  const { user } = useAuth();
   const [staff, setStaff] = useState([]);
   const [arms, setArms] = useState([]);
   const [subjects, setSubjects] = useState([]);
@@ -45,7 +48,8 @@ export default function AdminStaff() {
         <TabsList className="mb-5">
           <TabsTrigger value="assignments">Assignments</TabsTrigger>
           <TabsTrigger value="staff">Staff</TabsTrigger>
-          <TabsTrigger value="accounts">Portal accounts</TabsTrigger>
+          {user?.is_primary_admin && <TabsTrigger value="accounts">Portal accounts</TabsTrigger>}
+          {user?.is_primary_admin && <TabsTrigger value="privileges">Roles & privileges</TabsTrigger>}
         </TabsList>
 
         <TabsContent value="assignments">
@@ -60,9 +64,8 @@ export default function AdminStaff() {
         <TabsContent value="staff">
           <StaffList staff={staff} reload={loadStaff} />
         </TabsContent>
-        <TabsContent value="accounts">
-          <PortalAccounts />
-        </TabsContent>
+        {user?.is_primary_admin && <TabsContent value="accounts"><PortalAccounts /></TabsContent>}
+        {user?.is_primary_admin && <TabsContent value="privileges"><StaffPrivilegesPanel /></TabsContent>}
       </Tabs>
     </AppShell>
   );

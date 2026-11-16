@@ -2,7 +2,7 @@ import { Link, NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Users, GraduationCap, BookOpen, CalendarDays,
   ClipboardCheck, Wallet, Library, Settings, NotebookPen, UserCircle2,
-  BarChart3, FileText, MessageSquare, Bell, Landmark, Coins, BookMarked
+  BarChart3, FileText, MessageSquare, Bell, Landmark, Coins, BookMarked, ClipboardList, ShieldCheck
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -39,6 +39,7 @@ export const NAV = {
       { to: '/admin/staff', label: 'Staff & Assignments', icon: Users },
       { to: '/admin/accounts', label: 'Portal accounts', icon: UserCircle2 },
       { to: '/admin/admissions', label: 'Admission applications', icon: GraduationCap },
+      { to: '/admin/handover', label: 'Emergency succession', icon: ShieldCheck },
       { to: '/admin/requests', label: 'Student & parent requests', icon: NotebookPen },
       { to: '/account/profile', label: 'Profile & settings', icon: UserCircle2 },
       { to: '/account/notifications', label: 'Notifications', icon: Bell },
@@ -69,6 +70,7 @@ export const NAV = {
       { to: '/principal/requests', label: 'Student & parent requests', icon: NotebookPen },
       { to: '/principal/approvals', label: 'Approvals & activity', icon: ClipboardCheck },
       { to: '/principal/receipt-approvals', label: 'Fee receipt approvals', icon: ClipboardCheck },
+      { to: '/admin/handover', label: 'Emergency succession', icon: ShieldCheck },
       { to: '/account/profile', label: 'Profile & settings', icon: UserCircle2 },
       { to: '/account/notifications', label: 'Notifications', icon: Bell },
     ] },
@@ -116,8 +118,35 @@ export const NAV = {
   parent: learnerGroups('/parent', 'My children'),
 };
 
-export default function AppSidebar({ role, schoolName, schoolLogo, onNavigate }) {
-  const groups = NAV[role] || NAV.student;
+const PRIVILEGE_LINKS = {
+  register_students: { to: '/admin/students', label: 'Register students', icon: GraduationCap },
+  edit_students: { to: '/admin/students', label: 'Edit student records', icon: GraduationCap },
+  delete_students: { to: '/admin/students', label: 'Student register', icon: GraduationCap },
+  assign_teachers: { to: '/admin/staff', label: 'Teacher assignments', icon: Users },
+  manage_classes: { to: '/admin/academics', label: 'Classes & subjects', icon: BookOpen },
+  manage_timetable: { to: '/admin/timetable', label: 'Class timetable', icon: CalendarDays },
+  manage_exam_timetable: { to: '/admin/resources', label: 'Examination timetable', icon: CalendarDays },
+  manage_staff_attendance: { to: '/admin/staff-attendance', label: 'Staff attendance', icon: ClipboardCheck },
+  manage_student_attendance: { to: '/admin/attendance', label: 'Student attendance', icon: ClipboardCheck },
+  approve_requests: { to: '/admin/approvals', label: 'Approval requests', icon: ClipboardList },
+  manage_portal_requests: { to: '/admin/requests', label: 'Student & parent requests', icon: NotebookPen },
+  approve_finance: { to: '/admin/approvals', label: 'Financial approvals', icon: Wallet },
+  approve_results: { to: '/admin/approvals', label: 'Results approval', icon: ClipboardCheck },
+  manage_admissions: { to: '/admin/admissions', label: 'Admission applications', icon: GraduationCap },
+  manage_academic_sessions: { to: '/admin/academics', label: 'Academic sessions', icon: CalendarDays },
+  manage_notices: { to: '/admin/resources', label: 'School notices', icon: MessageSquare },
+  manage_documents: { to: '/admin/resources', label: 'School documents', icon: FileText },
+  approve_documents: { to: '/admin/resources', label: 'Document approvals', icon: ClipboardCheck },
+  manage_library: { to: '/library', label: 'Library management', icon: Library },
+  manage_staff_records: { to: '/admin/staff', label: 'Staff records', icon: Users },
+};
+
+export default function AppSidebar({ role, schoolName, schoolLogo, onNavigate, privileges = [], isPrimaryAdmin = false, restrictedAdmin = false }) {
+  const baseGroups = restrictedAdmin && role === 'admin'
+    ? [{ group: 'Account', items: [{ to: '/admin', label: 'Dashboard', icon: LayoutDashboard, end: true }, { to: '/account/profile', label: 'Profile & settings', icon: UserCircle2 }, { to: '/account/notifications', label: 'Notifications', icon: Bell }] }]
+    : (NAV[role] || NAV.student);
+  const extraItems = [...new Set(privileges)].map((key) => PRIVILEGE_LINKS[key]).filter(Boolean);
+  const groups = [...baseGroups, ...(extraItems.length && !isPrimaryAdmin ? [{ group: 'Additional duties', items: extraItems }] : [])];
   const initials = (schoolName || 'School').slice(0, 2).toUpperCase();
 
   return (

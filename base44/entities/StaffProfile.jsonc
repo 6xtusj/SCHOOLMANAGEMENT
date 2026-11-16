@@ -37,7 +37,9 @@
         "teacher",
         "principal",
         "bursar",
-        "librarian"
+        "librarian",
+        "staff",
+        "admin"
       ],
       "default": "teacher"
     },

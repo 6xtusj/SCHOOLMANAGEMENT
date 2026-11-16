@@ -26,7 +26,9 @@ export default function ApprovalPanel({ role: roleProp = 'admin' }) {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [processAmounts, setProcessAmounts] = useState({});
-  const canReviewRequest = (request) => role === 'principal' || (role === 'admin' && request.kind === 'result_publish');
+  const assigned = new Set(user?.active_privileges || []);
+  const canReviewRequest = (request) => role === 'principal' || (role === 'admin' && request.kind === 'result_publish') || (request.kind === 'result_publish' && (assigned.has('approve_results') || assigned.has('approve_requests'))) || (['fee_change','salary_change','salary_payment','curriculum_change'].includes(request.kind) && (assigned.has('approve_finance') || assigned.has('approve_requests')));
+  const canSubmitProposal = ['admin','principal','bursar'].includes(role) && !assigned.has('approve_finance') && !assigned.has('approve_results') && !assigned.has('approve_requests');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -68,7 +70,7 @@ export default function ApprovalPanel({ role: roleProp = 'admin' }) {
   };
 
   return <div className="space-y-4">
-    {role !== 'admin' && role !== 'principal' && <div className="surface space-y-3 p-4">
+    {canSubmitProposal && role === 'bursar' && <div className="surface space-y-3 p-4">
       <h3 className="font-heading text-sm font-semibold">Submit a change for approval</h3>
       <p className="text-xs text-muted-foreground">Fee proposals change the fee schedule after approval. Salary proposals request a salary or staff-payment change. Salary changes require Principal approval.</p>
       <div className="grid gap-3 md:grid-cols-2">

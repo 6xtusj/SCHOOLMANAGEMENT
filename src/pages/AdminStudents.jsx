@@ -28,19 +28,14 @@ export default function AdminStudents() {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(blank);
   const [saving, setSaving] = useState(false);
-  const [schoolInitials, setSchoolInitials] = useState('SCH');
 
   const load = async () => {
-    const [s, a, settings] = await Promise.all([
+    const [s, a] = await Promise.all([
       base44.entities.Student.list({ sort: 'full_name', limit: 500 }),
       base44.entities.ClassArm.list({ sort: 'order', limit: 200 }),
-      base44.entities.SchoolSettings.list({ limit: 1 }),
     ]);
     setStudents(items(s));
     setArms(sortArms(items(a).filter((x) => x.active)));
-    const school = items(settings)[0] || {};
-    const initials = school.school_initials || (school.school_name || '').split(/\s+/).filter(Boolean).map((word) => word[0]).join('').slice(0, 8);
-    setSchoolInitials(initials.toUpperCase() || 'SCH');
     setLoading(false);
   };
 
@@ -94,8 +89,7 @@ export default function AdminStudents() {
     if (editing) {
       await base44.entities.Student.update(editing.id, payload);
     } else {
-      const seq = String(students.length + 1).padStart(3, '0');
-      payload.admission_no = payload.admission_no || `${schoolInitials}/${new Date().getFullYear()}/${seq}`;
+      // The backend allocates the next yearly registration number transactionally.
       await base44.entities.Student.create(payload);
     }
     setSaving(false);

@@ -1,8 +1,10 @@
-# Nigerian School Management System — Combined V9.1 Update
+# Nigerian School Management System — V9.4 coordinated update
 
 > **Persistence warning for Render Free:** the web service filesystem is ephemeral. The hosted app must use Neon/PostgreSQL, not local `school.db`. After deployment, open `/healthz` and confirm `database_engine` is `postgresql`. If it says `sqlite`, stop entering records and correct the Render `DATABASE_URL` setting. Render sleeping after inactivity does not delete Neon data; an SQLite fallback or changed/empty database target is the likely cause of apparent data loss. See [Operations and Recovery](OPERATIONS_AND_RECOVERY.md).
 
 This package includes the V9.1 combined reliability update on top of the supplied V8.0 application. See [V9.1 implementation report](V9_1_COMBINED_UPDATE_REPORT.md) for implemented changes, test evidence and outstanding work.
+
+The V9.4 coordinated update adds staff bank-detail change requests with Bursary approval, additional Teacher/Parent portals for staff without changing their main role, resilient account-role updates and notification preferences, and persistent in-app approval alerts. See [V9.4 implementation and verification report](V9_4_COORDINATED_FIX_REPORT.md) for exact portal locations, preserved data, test results and deployment limitations.
 
 This package keeps the supplied React/Vite application as its frontend and runs the API and authentication through Flask. Set `DATABASE_URL` to use PostgreSQL (including Neon); if it is blank, the app uses SQLite for local fallback and tests. The original page/component files, layout, navigation and styling are retained; `src/api/base44Client.js` is now a compatibility adapter that sends the existing page calls to `/api`.
 
@@ -141,7 +143,7 @@ Portal Accounts supports permanent deletion as well as deactivation for ordinary
 
 Email is optional and can be configured later in **Admin → School Settings → School email**. Leave it unconfigured to use manual invitations. When an invitation email cannot be delivered, copy the generated secure invitation link from Portal Accounts and share it directly. Resend generates a fresh invitation link or password-reset link.
 
-The sender's display name is taken from School Settings, while the sender email uses the configured provider sender address. The administrator-only test email checks delivery and the portal URL before inviting families. The same section lists the latest 50 email attempts, including delivery status and failure details; “sent” means the provider accepted the message, not that it reached the recipient's inbox. Logs retain recipient, subject, status, timestamp and error only (not message bodies or credentials). Provider credentials are encrypted in the server database using `SECRET_KEY`; keep that key stable across restarts and backups. Email history is available only to Admin.
+The sender's display name is taken from School Settings, while the sender email uses the configured provider sender address. The administrator-only test email checks delivery and the portal URL before inviting families. The same section initially lists the latest 5 email attempts, with a View more history control that loads older records in additional pages of 5, including delivery status and failure details; “sent” means the provider accepted the message, not that it reached the recipient's inbox. Email history is retained without automatic 90-day deletion and records recipient, subject, status, timestamp and error only (not message bodies or credentials). Provider credentials are encrypted in the server database using `SECRET_KEY`; keep that key stable across restarts and backups. Email history is available only to Admin.
 
 Every signed-in role now has **Notifications** settings in its portal (students and parents also have this in their account menu). Users can turn off all school activity emails or select finance, academic, attendance, notices, requests, library, admissions, approvals, and school-operation categories. Email delivery uses the school's selected provider; without a configured provider, preferences still save but activity emails are not delivered. Current email events include fee-receipt approval requests and decisions, payments, approval requests and decisions, published report cards, attendance changes, school notices, portal-request responses, library loan updates, account-role changes, and admission schedule messages. Admission applicants without an existing portal account still receive application confirmation email through the selected provider.
 
@@ -185,8 +187,8 @@ Back up `school.db` and `uploads/` before updating, as always. This update uses 
 
 ### Staff bank details
 
-- Staff can enter bank name, account name and a 10-digit account number under Profile & Settings → My payment details.
-- These details are encrypted in the configured database using a Fernet key derived from `SECRET_KEY`. The Bursary → Staff bank details page is the only administrative interface that decrypts and displays staff payout details. The API is restricted to the `bursar` role; Principal and Admin do not get routine access to full account numbers.
+- Every staff portal, including Principal, Admin, Teachers, Bursary and Librarian, can enter bank name, account name and a 10-digit account number under Profile & Settings → My payment details. If an older staff login has no StaffProfile record yet, the first bank-details visit creates the missing staff-directory link without replacing existing profile information.
+- These details are encrypted in the configured database using a Fernet key derived from `SECRET_KEY`. The Bursary → Staff bank details page is the only administrative interface that decrypts and displays staff payout details. The API is restricted to the `bursar` role; Principal and Admin do not get routine access to full account numbers. Staff can view and update only their own details.
 - Keep the same strong `SECRET_KEY` across restarts and backups. If it is changed, existing encrypted staff bank details cannot be decrypted. Plan a key-rotation/migration before changing it.
 
 ### Profile saving and request actions
@@ -216,3 +218,22 @@ The code changes add PostgreSQL connectivity and Neon-backed private file storag
 - Configure the Paystack webhook URL as `https://YOUR-DOMAIN/api/payments/paystack/webhook`. The webhook signature is validated using the Paystack secret. Keep the secret in the server environment only; never put it in React/Vite variables or commit a real key.
 - Approved payment records with receipt numbers can be printed or saved as PDF from the Parent/Student Finance payment history. The receipt uses the school identity/logo configured under Admin → School Settings. Manual bank-transfer submissions become printable only after Bursary approval creates the official payment record.
 - Paystack live transactions require a valid school Paystack account, test/live credentials, a publicly reachable HTTPS deployment and a configured webhook. These cannot be verified from a local source-code-only test.
+
+
+## V9.3 — Staff privileges, emergency succession, registration numbers and email history
+
+- Added an additive `staff_privileges` table and Primary Admin-only Staff Roles & Privileges controls. The Primary Admin can grant individual responsibilities permanently or with a calendar expiry date, and withdraw active grants immediately. Grants are audited and checked by the backend on each protected request; expiry is not merely a hidden menu item.
+- Added a restricted-Admin mode. Existing ordinary Admin accounts retain their current access until the Primary Admin explicitly limits them. Once restricted, an Admin can use only explicitly granted privileges. Only the Primary Admin can change portal account roles/statuses, appoint additional Admin accounts, suspend/deactivate/reactivate accounts, or permanently delete portal accounts. The Primary Admin account remains protected by immutable user ID.
+- Added an emergency succession flow initiated by the Principal when the Primary Admin is unavailable. The Principal must re-authenticate and provide a reason; an active eligible staff successor must accept; completion transfers the immutable Primary Admin owner ID. Other Admin accounts are not demoted. The previous owner's active sessions are invalidated, and the transfer is audited.
+- Student registration numbers are now allocated on the backend in a transaction as `SCHOOLCODE/YYYY/NNN`, continuing naturally to `1000`, `1001`, etc. The allocator checks existing student numbers before continuing and is shared by manual registration and successful admission-application enrolment.
+- Admin email delivery history now fetches five records initially and loads older records in additional pages of five. The full history remains stored.
+- Admin accounts are included in the encrypted staff bank-details workflow. Older staff logins without a StaffProfile receive a linked staff-directory record when they first open My payment details; the Bursary remains the only role that can decrypt other staff bank account numbers.
+- Added regression tests for registration sequence, email pagination, Admin bank details, privilege grant/withdrawal, restricted Admin access and emergency handover.
+
+### Verification limits for V9.3
+
+- Python syntax/AST checks: PASS.
+- Database translation and storage tests: 16 PASS.
+- New Flask workflow regression tests: ADDED BUT NOT EXECUTED because Flask/Werkzeug are not installed in this execution environment and package installation is blocked by unavailable network access.
+- Frontend build/lint: NOT EXECUTED because npm dependencies are not fully cached and registry access is unavailable. Dockerfile and Render Blueprint were preserved unchanged; Docker will rebuild the frontend from source during deployment.
+- Live Neon migration, Render startup, browser workflow, and production handover: NOT TESTED. Deploy first to a safe preview/test service and verify before replacing the current live deployment.

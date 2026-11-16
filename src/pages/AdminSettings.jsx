@@ -33,6 +33,8 @@ export default function AdminSettings() {
   const [testStatus, setTestStatus] = useState('');
   const [testSending, setTestSending] = useState(false);
   const [emailDeliveries, setEmailDeliveries] = useState([]);
+  const [emailHistoryHasMore, setEmailHistoryHasMore] = useState(false);
+  const [emailHistoryLoading, setEmailHistoryLoading] = useState(false);
   const [emailLogsError, setEmailLogsError] = useState('');
   const [emailSettings, setEmailSettings] = useState({
     provider: 'brevo', sender_email: '', smtp_host: '', smtp_port: 587, smtp_tls: true,
@@ -51,12 +53,18 @@ export default function AdminSettings() {
   const [emailSettingsSaved, setEmailSettingsSaved] = useState(false);
   const [emailSettingsError, setEmailSettingsError] = useState('');
 
-  const loadEmailDeliveries = useCallback(async () => {
-    const response = await fetch('/api/admin/email-deliveries');
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Could not load email delivery history.');
-    setEmailDeliveries(data);
-    setEmailLogsError('');
+  const loadEmailDeliveries = useCallback(async (offset = 0, append = false) => {
+    setEmailHistoryLoading(true);
+    try {
+      const response = await fetch(`/api/admin/email-deliveries?limit=5&offset=${Math.max(0, Number(offset) || 0)}`, { credentials: 'include' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not load email delivery history.');
+      setEmailDeliveries((current) => append ? [...current, ...data] : data);
+      setEmailHistoryHasMore(response.headers.get('X-Has-More') === 'true');
+      setEmailLogsError('');
+    } finally {
+      setEmailHistoryLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -370,8 +378,8 @@ export default function AdminSettings() {
             <Button type="button" onClick={sendTestEmail} disabled={testSending || !loaded || !testRecipient.trim()}>
               {testSending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />} Send test email
             </Button>
-            <Button type="button" variant="outline" onClick={() => loadEmailDeliveries().catch((error) => setEmailLogsError(error.message || 'Could not load email history.'))}>
-              Refresh history
+            <Button type="button" variant="outline" onClick={() => loadEmailDeliveries(0, false).catch((error) => setEmailLogsError(error.message || 'Could not load email history.'))} disabled={emailHistoryLoading}>
+              {emailHistoryLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />} Refresh history
             </Button>
           </div>
           {testStatus && <p className="mt-2 text-sm" role="status">{testStatus}</p>}
@@ -387,6 +395,7 @@ export default function AdminSettings() {
                 {delivery.error && <p className="mt-1 text-destructive">{delivery.error}</p>}
               </div>
             ))}
+            {emailDeliveries.length > 0 && <div className="flex flex-wrap items-center justify-between gap-2 pt-2"><p className="text-xs text-muted-foreground">Showing {emailDeliveries.length} recent email records. Older history is kept.</p>{emailHistoryHasMore && <Button type="button" size="sm" variant="outline" disabled={emailHistoryLoading} onClick={() => loadEmailDeliveries(emailDeliveries.length, true).catch((error) => setEmailLogsError(error.message || 'Could not load more email history.'))}>{emailHistoryLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}View more history</Button>}</div>}
           </div>
         </div>
       </div>

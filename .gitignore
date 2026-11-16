@@ -1,22 +1,28 @@
+# Environment variables and credentials
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files
 .venv/
 venv/
-node_modules/
-dist/
 __pycache__/
 *.py[cod]
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+
+# Local databases, uploads and backups (keep them out of Git)
 *.db
 *.db-*
 *.sqlite
 *.sqlite3
-uploads/**
-!uploads/.gitkeep
-backups/
-.vscode/
-.env
-.env.*
-!.env.example
+/uploads/
+/backups/
+/backup/
+
+# Logs and operating-system files
+*.log
 .DS_Store
 Thumbs.db
-*.log
-School Management.zip
-.neon

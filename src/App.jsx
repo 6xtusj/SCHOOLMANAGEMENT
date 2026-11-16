@@ -26,6 +26,7 @@ import AdminTimetable from '@/pages/AdminTimetable';
 import AdminResources from '@/pages/AdminResources';
 import AdminSettings from '@/pages/AdminSettings';
 import AdminWorkflowDesk from '@/pages/AdminWorkflowDesk';
+import AdminApprovals from '@/pages/AdminApprovals';
 import AdminHandoverPage from '@/pages/AdminHandoverPage';
 import TeacherDashboard from '@/pages/TeacherDashboard';
 import TeacherResults from '@/pages/TeacherResults';
@@ -105,6 +106,7 @@ const AuthenticatedApp = () => {
         <Route path="/admin/resources" element={<AdminResources />} />
         <Route path="/admin/settings" element={<AdminSettings />} />
         <Route path="/admin/workflows" element={<AdminWorkflowDesk />} />
+        <Route path="/admin/approvals" element={<AdminApprovals />} />
         <Route path="/admin/handover" element={<AdminHandoverPage />} />
         <Route path="/teacher" element={<TeacherDashboard />} />
         <Route path="/teacher/:section" element={<TeacherWorkspace />} />

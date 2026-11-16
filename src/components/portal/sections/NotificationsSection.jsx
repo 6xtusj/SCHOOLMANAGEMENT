@@ -78,8 +78,9 @@ export default function NotificationsSection() {
     <div className="surface max-w-2xl space-y-5 p-5">
       <div>
         <h2 className="font-heading text-sm font-semibold">Email notification settings</h2>
-        <p className="mt-1 text-xs text-muted-foreground">Choose which portal activity updates should be sent to your account email.</p>
+        <p className="mt-1 text-xs text-muted-foreground">Choose which portal activity updates should be sent to your account email. In-app alerts remain available in the notification bell even when email is switched off.</p>
       </div>
+      {!emailConfigured && <p role="status" className="rounded-md bg-warning/10 p-3 text-xs text-warning">The school email service is not currently available or its saved settings need attention. In-app notifications will still appear in the bell at the top of the portal.</p>}
       <div className="flex items-center justify-between gap-4 rounded-lg border border-border/60 p-3">
         <div>
           <p className="text-sm font-medium">Email notifications</p>

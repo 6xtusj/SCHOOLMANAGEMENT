@@ -14,7 +14,7 @@ from hashlib import sha256
 from base64 import urlsafe_b64encode
 from cryptography.fernet import Fernet, InvalidToken
 from urllib.parse import quote, urlencode, urlsplit
-from flask import Flask, jsonify, request, session, send_file, send_from_directory, abort, has_request_context
+from flask import Flask, jsonify, request, session, send_file, send_from_directory, abort, has_request_context, g
 from PIL import Image, UnidentifiedImageError
 from storage import FileStorage, StorageError
 
@@ -311,7 +311,11 @@ def smtp_config():
 
 
 def email_provider_is_configured():
-    cfg = smtp_config()
+    try:
+        cfg = smtp_config()
+    except Exception:
+        app.logger.exception('Could not read saved email provider configuration')
+        return False
     provider = cfg['EMAIL_PROVIDER']
     if not cfg['SMTP_FROM']:
         return False
@@ -454,7 +458,14 @@ def branded_email_message(to_email, subject, body, branding=None, sender=None, a
 
 
 def send_mail(to_email, subject, body, action_label=None):
-    cfg = smtp_config()
+    try:
+        cfg = smtp_config()
+    except Exception as exc:
+        app.logger.exception('Email provider configuration could not be read')
+        error = f'{type(exc).__name__}: {exc}'[:1000]
+        try: log_email_delivery(to_email, subject, 'failed', error)
+        except Exception: pass
+        return False, error
     provider = cfg['EMAIL_PROVIDER']
     sender = cfg['SMTP_FROM']
     provider_ready = {
@@ -602,7 +613,6 @@ def log_email_delivery(to_email, subject, status, error=None):
                 (str(uuid.uuid4()), str(to_email or '')[:320], str(subject or '')[:250], status,
                  str(error)[:1000] if error else None, session.get('user_id') if has_request_context() else None, now()),
             )
-            c.execute("DELETE FROM email_delivery_logs WHERE created_at < datetime('now','-90 days')")
     except database_errors():
         app.logger.exception('Email delivery status could not be recorded')
 
@@ -619,18 +629,26 @@ def notify_user(user_id, category, subject, body, action_label=None):
         if not user:
             return False
         row = c.execute('SELECT email_enabled,preferences_json FROM notification_preferences WHERE user_id=?', (user_id,)).fetchone()
+        # In-app alerts are always stored. Turning off email must never hide an
+        # approval task inside the application.
+        c.execute('INSERT INTO in_app_notifications(id,user_id,category,subject,body,action_label,created_at) VALUES(?,?,?,?,?,?,?)',
+                  (str(uuid.uuid4()), user_id, category, str(subject or 'School notification')[:250], str(body or '')[:4000], action_label, now()))
     preferences = dict(DEFAULT_NOTIFICATION_PREFERENCES)
     if row:
-        preferences.update(json.loads(row['preferences_json'] or '{}'))
+        try:
+            preferences.update(json.loads(row['preferences_json'] or '{}'))
+        except (TypeError, ValueError):
+            app.logger.warning('Invalid notification preferences for user %s; using defaults', user_id)
         if not row['email_enabled'] or not preferences.get(category, True):
-            return False
-    if action_label:
-        sent, error = send_mail(user['email'], subject, body, action_label)
-    else:
-        sent, error = send_mail(user['email'], subject, body)
+            return True
+    try:
+        sent, error = send_mail(user['email'], subject, body, action_label) if action_label else send_mail(user['email'], subject, body)
+    except Exception as exc:
+        sent, error = False, f'{type(exc).__name__}: {exc}'[:1000]
+        app.logger.exception('Notification email dispatch failed for user %s', user_id)
     if not sent:
         app.logger.warning('Notification email was not sent to user %s: %s', user_id, error)
-    return sent
+    return bool(sent)
 
 
 def notify_email(email, category, subject, body, action_label=None):
@@ -785,6 +803,13 @@ def migrate_schema(c):
     c.execute("CREATE TABLE IF NOT EXISTS recovery_links (token_hash TEXT PRIMARY KEY, target_user_id TEXT NOT NULL, target_email TEXT NOT NULL, generated_by TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, revoked_at TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS email_change_requests (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, new_email TEXT NOT NULL, code_hash TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, verified_at TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS notification_preferences (user_id TEXT PRIMARY KEY REFERENCES auth_users(id) ON DELETE CASCADE, email_enabled INTEGER NOT NULL DEFAULT 1, preferences_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS in_app_notifications (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE, category TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, action_label TEXT, created_at TEXT NOT NULL, read_at TEXT)")
+    c.execute('CREATE INDEX IF NOT EXISTS idx_in_app_notifications_user_created ON in_app_notifications(user_id,created_at DESC)')
+    c.execute("CREATE TABLE IF NOT EXISTS user_portal_roles (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE, portal_role TEXT NOT NULL CHECK(portal_role IN ('teacher','parent')), granted_by TEXT NOT NULL, granted_at TEXT NOT NULL, revoked_at TEXT)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_portal_roles_active ON user_portal_roles(user_id,portal_role) WHERE revoked_at IS NULL")
+    c.execute("CREATE TABLE IF NOT EXISTS staff_bank_change_requests (id TEXT PRIMARY KEY, staff_id TEXT NOT NULL, user_id TEXT NOT NULL, encrypted_payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')), submitted_at TEXT NOT NULL, reviewed_by TEXT, reviewed_at TEXT, decision_note TEXT)")
+    c.execute('CREATE INDEX IF NOT EXISTS idx_staff_bank_change_status ON staff_bank_change_requests(status,submitted_at DESC)')
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_bank_change_one_pending ON staff_bank_change_requests(staff_id) WHERE status='pending'")
     c.execute("CREATE TABLE IF NOT EXISTS email_delivery_logs (id TEXT PRIMARY KEY, recipient TEXT NOT NULL, subject TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('sent','failed')), error TEXT, actor_user_id TEXT, created_at TEXT NOT NULL)")
     c.execute('CREATE INDEX IF NOT EXISTS idx_email_delivery_logs_created ON email_delivery_logs(created_at DESC)')
     c.execute("CREATE TABLE IF NOT EXISTS public_site_settings (id INTEGER PRIMARY KEY CHECK(id=1), content_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL, updated_by TEXT)")
@@ -803,6 +828,13 @@ def migrate_schema(c):
     c.execute('CREATE INDEX IF NOT EXISTS idx_paystack_student_status ON paystack_transactions(student_id,status,created_at)')
     c.execute("CREATE INDEX IF NOT EXISTS idx_school_payment_accounts_status ON school_payment_accounts(status,purpose,submitted_at)")
     c.execute("CREATE TABLE IF NOT EXISTS staff_bank_details (staff_id TEXT PRIMARY KEY, encrypted_payload TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS admission_number_counters (admission_year TEXT PRIMARY KEY, last_number INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS staff_privileges (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, privilege_key TEXT NOT NULL, granted_by TEXT NOT NULL, created_at TEXT NOT NULL, starts_at TEXT NOT NULL, expires_at TEXT, revoked_at TEXT, note TEXT NOT NULL DEFAULT '')")
+    c.execute("CREATE TABLE IF NOT EXISTS staff_admin_access (user_id TEXT PRIMARY KEY, restrict_admin INTEGER NOT NULL DEFAULT 0, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_staff_privileges_user_active ON staff_privileges(user_id,revoked_at,starts_at,expires_at)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_admission_number_year ON admission_number_counters(admission_year)")
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(9,?)", (now(),))
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(10,?)", (now(),))
     c.execute("CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, ip_address TEXT NOT NULL, attempted_at TEXT NOT NULL, success INTEGER NOT NULL DEFAULT 0)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(email,ip_address,attempted_at)")
     c.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(6,?)", (now(),))
@@ -821,15 +853,186 @@ def _bank_cipher():
     return Fernet(key)
 
 def _staff_record_for_user(conn, user):
-    return conn.execute("SELECT id,data FROM records WHERE entity='StaffProfile' AND lower(json_extract(data,'$.email'))=? ORDER BY updated_date DESC LIMIT 1", (str(user.get('email') or '').lower(),)).fetchone()
+    email = str(user.get('email') or '').lower()
+    staff = conn.execute("SELECT id,data FROM records WHERE entity='StaffProfile' AND lower(json_extract(data,'$.email'))=? ORDER BY updated_date DESC LIMIT 1", (email,)).fetchone()
+    if staff:
+        return staff
+    if str(user.get('primary_role') or user.get('role') or '') not in _staff_roles():
+        return None
+    account = conn.execute('SELECT id,full_name,role,email FROM auth_users WHERE id=?', (user.get('id'),)).fetchone()
+    if not account:
+        return None
+    # Some older staff logins have a PortalProfile but no StaffProfile. Promote the
+    # existing profile data into the staff directory once so payroll and bank details
+    # use the same permanent staff record for Principal, Admin, Bursary and Librarian.
+    portal = conn.execute("SELECT data FROM records WHERE entity='PortalProfile' AND lower(json_extract(data,'$.email'))=? ORDER BY updated_date DESC LIMIT 1", (email,)).fetchone()
+    try:
+        profile = json.loads(portal['data']) if portal else {}
+    except (TypeError, ValueError):
+        profile = {}
+    profile.update(email=account['email'],full_name=profile.get('full_name') or account['full_name'],role=account['role'],active=True)
+    staff_id=str(uuid.uuid4()); stamp=now()
+    conn.execute('INSERT INTO records(id,entity,data,created_date,updated_date) VALUES(?,?,?,?,?)',(staff_id,'StaffProfile',json.dumps(profile),stamp,stamp))
+    return {'id':staff_id,'data':json.dumps(profile)}
 
 def _staff_roles():
-    return ('teacher','staff','principal','bursar','librarian')
+    return ('teacher','staff','principal','bursar','librarian','admin')
+
+
+STAFF_PRIVILEGE_CATALOG = {
+    'register_students': ('Register students', 'Create student admission records.'),
+    'edit_students': ('Edit student records', 'View and update student records.'),
+    'delete_students': ('Delete student records', 'Remove student records where the system permits deletion.'),
+    'assign_teachers': ('Assign teachers and subjects', 'Manage teacher, subject and form-teacher assignments.'),
+    'manage_classes': ('Manage classes and subjects', 'Manage class arms, tracks and subject configuration.'),
+    'manage_timetable': ('Manage class timetable', 'Create and update the regular school timetable.'),
+    'manage_exam_timetable': ('Manage examination timetable', 'Create and update examination timetable entries.'),
+    'manage_staff_attendance': ('Manage staff attendance', 'View and record daily staff attendance.'),
+    'manage_student_attendance': ('Manage student attendance', 'View and manage student attendance records.'),
+    'approve_requests': ('Review approval requests', 'Review supported fee, salary and academic approval requests.'),
+    'manage_portal_requests': ('Respond to student and parent requests', 'Review, update and respond to student/parent portal requests.'),
+    'approve_finance': ('Approve financial changes and payments', 'Approve fee and staff-payment proposals, subject to separation-of-duties checks.'),
+    'approve_results': ('Approve results and publication', 'Review result approvals and report-card publication requests.'),
+    'approve_documents': ('Approve school documents', 'Review documents submitted for school approval.'),
+    'manage_admissions': ('Manage admission applications', 'Review and decide submitted admission applications.'),
+    'manage_academic_sessions': ('Manage academic sessions and terms', 'Create academic sessions and manage term stages.'),
+    'manage_notices': ('Manage school notices and calendar', 'Create and update school notices and calendar events.'),
+    'manage_documents': ('Manage school documents', 'Manage authorised school document and resource workflows.'),
+    'manage_library': ('Manage library', 'Manage book catalogue and library loans.'),
+    'manage_staff_records': ('Manage staff records', 'View and update staff directory records.'),
+}
+
+
+def has_staff_privilege(user, privilege_key, conn=None):
+    if not user or (user.get('primary_role') or user.get('role')) not in _staff_roles() or privilege_key not in STAFF_PRIVILEGE_CATALOG:
+        return False
+    if not has_request_context():
+        owns_connection = conn is None
+        c = conn or db()
+        try:
+            return bool(c.execute("SELECT 1 FROM staff_privileges WHERE user_id=? AND privilege_key=? AND revoked_at IS NULL AND starts_at<=? AND (expires_at IS NULL OR expires_at>?) LIMIT 1", (user['id'],privilege_key,now(),now())).fetchone())
+        finally:
+            if owns_connection: c.close()
+    cache = getattr(g, '_active_staff_privileges', None)
+    if cache is None or cache.get('user_id') != user.get('id'):
+        with db() as c:
+            rows=c.execute("SELECT privilege_key FROM staff_privileges WHERE user_id=? AND revoked_at IS NULL AND starts_at<=? AND (expires_at IS NULL OR expires_at>?)",(user['id'],now(),now())).fetchall()
+        cache={'user_id':user.get('id'),'keys':{row['privilege_key'] for row in rows}}
+        g._active_staff_privileges=cache
+    return privilege_key in cache['keys']
+
+
+ENDPOINT_PRIVILEGE_MAP = {
+    'workflow_staff_attendance_list': 'manage_staff_attendance',
+    'workflow_staff_attendance_save': 'manage_staff_attendance',
+    'admission_application_list': 'manage_admissions',
+    'admission_application_decision': 'manage_admissions',
+    'resource_decision': 'approve_documents',
+    'approval_list': 'approve_requests',
+    'approval_decision': 'approve_requests',
+    'portal_request_respond': 'manage_portal_requests',
+    'optional_subject_change_list': 'approve_requests',
+    'optional_subject_change_decision': 'approve_requests',
+    'workflow_syllabus_create': 'assign_teachers',
+    'workflow_syllabus_update': 'assign_teachers',
+    'workflow_result_reviews': 'approve_results',
+    'workflow_result_review_decision': 'approve_results',
+    'workflow_library_book_create': 'manage_library',
+    'workflow_library_loan': 'manage_library',
+    'workflow_library_return': 'manage_library',
+    'workflow_library_loans': 'manage_library',
+    'academic_session_create': 'manage_academic_sessions',
+    'academic_term_create': 'manage_academic_sessions',
+    'academic_term_activate': 'manage_academic_sessions',
+    'academic_term_status_update': 'manage_academic_sessions',
+    'subject_rules_save': 'manage_classes',
+    'class_arm_reassign_delete': 'manage_classes',
+    'workflow_timetable_create': 'manage_timetable',
+    'curriculum_document_upload': 'manage_documents',
+    'curriculum_document_decision': 'approve_documents',
+    'report_cards_publish': 'approve_results',
+}
+
+
+def _school_registration_code(conn):
+    settings_row=conn.execute("SELECT data FROM records WHERE entity='SchoolSettings' ORDER BY updated_date DESC LIMIT 1").fetchone()
+    settings=json.loads(settings_row['data']) if settings_row else {}
+    return re.sub(r'[^A-Z0-9]','',str(settings.get('school_code') or settings.get('school_initials') or 'SCH').upper())[:8] or 'SCH'
+
+
+def _sync_admission_counter(conn, admission_no):
+    match=re.fullmatch(r'([A-Z0-9]+)/([0-9]{4})/([0-9]+)',str(admission_no or '').strip().upper())
+    if not match or match.group(1) != _school_registration_code(conn): return
+    admission_year=match.group(2); number=int(match.group(3)); stamp=now()
+    conn.execute(
+        'INSERT INTO admission_number_counters(admission_year,last_number,updated_at) VALUES(?,?,?) '
+        'ON CONFLICT(admission_year) DO UPDATE SET '
+        'last_number=CASE WHEN admission_number_counters.last_number>excluded.last_number THEN admission_number_counters.last_number ELSE excluded.last_number END,updated_at=excluded.updated_at',
+        (admission_year,number,stamp),
+    )
+
+
+def _next_admission_number(conn, admission_date=None):
+    """Allocate a permanent yearly school registration number inside the caller's DB transaction."""
+    date_text=str(admission_date or '')
+    year_match=re.match(r'^(\d{4})',date_text)
+    admission_year=year_match.group(1) if year_match else datetime.now().strftime('%Y')
+    school_code=_school_registration_code(conn)
+    prefix=f'{school_code}/{admission_year}/'
+    counter=conn.execute('SELECT last_number FROM admission_number_counters WHERE admission_year=?',(admission_year,)).fetchone()
+    highest_existing=int(counter['last_number']) if counter else 0
+    if not counter:
+        # One-time reconciliation with legacy registrations before the counter is created.
+        for row in conn.execute("SELECT data FROM records WHERE entity='Student'").fetchall():
+            try: admission_no=str(json.loads(row['data']).get('admission_no') or '')
+            except (TypeError,ValueError): continue
+            if admission_no.startswith(prefix):
+                suffix=admission_no[len(prefix):]
+                if suffix.isdigit(): highest_existing=max(highest_existing,int(suffix))
+    stamp=now()
+    conn.execute(
+        'INSERT INTO admission_number_counters(admission_year,last_number,updated_at) VALUES(?,?,?) '
+        'ON CONFLICT(admission_year) DO UPDATE SET '
+        'last_number=CASE WHEN admission_number_counters.last_number>excluded.last_number THEN admission_number_counters.last_number ELSE excluded.last_number END,updated_at=excluded.updated_at',
+        (admission_year,highest_existing,stamp),
+    )
+    allocated=conn.execute(
+        'UPDATE admission_number_counters SET last_number=last_number+1,updated_at=? '
+        'WHERE admission_year=? RETURNING last_number',(stamp,admission_year)
+    ).fetchone()
+    return f"{prefix}{int(allocated['last_number']):03d}"
+
+
+def _ensure_unique_admission_number(conn, admission_no, exclude_id=None):
+    query = "SELECT id FROM records WHERE entity='Student' AND lower(json_extract(data,'$.admission_no'))=lower(?)"
+    params = [str(admission_no or '')]
+    if exclude_id:
+        query += ' AND id<>?'
+        params.append(str(exclude_id))
+    return conn.execute(query + ' LIMIT 1', params).fetchone() is None
 
 def audit(actor, action, target_type=None, target_id=None, details=None):
     with db() as c:
         c.execute('INSERT INTO school_audit_log(id,actor_id,actor_role,action,target_type,target_id,details_json,created_at) VALUES(?,?,?,?,?,?,?,?)',
                   (str(uuid.uuid4()), actor.get('id'), actor.get('role'), action, target_type, target_id, json.dumps(details or {}), now()))
+
+
+def _available_portal_roles(conn, user):
+    primary = str(user.get('role') or 'student').lower()
+    roles = [primary]
+    rows = conn.execute("SELECT portal_role FROM user_portal_roles WHERE user_id=? AND revoked_at IS NULL ORDER BY portal_role", (user['id'],)).fetchall()
+    roles.extend(str(row['portal_role']).lower() for row in rows)
+    email = str(user.get('email') or '').strip().lower()
+    if primary in _staff_roles() or any(role in _staff_roles() for role in roles):
+        assigned = conn.execute("SELECT 1 FROM records WHERE entity='Assignment' AND lower(COALESCE(json_extract(data,'$.teacher_email'),''))=? LIMIT 1", (email,)).fetchone()
+        if assigned:
+            roles.append('teacher')
+    linked_child = conn.execute("SELECT 1 FROM records WHERE entity='Student' AND (lower(COALESCE(json_extract(data,'$.guardian_email'),''))=? OR lower(COALESCE(json_extract(data,'$.parent_email'),''))=? OR lower(COALESCE(json_extract(data,'$.guardian_email_2'),''))=? OR lower(COALESCE(json_extract(data,'$.parent_email_2'),''))=? OR lower(COALESCE(json_extract(data,'$.guardian_emails'),'')) LIKE ? OR lower(COALESCE(json_extract(data,'$.parent_emails'),'')) LIKE ?) LIMIT 1", (email,email,email,email,f'%{email}%',f'%{email}%')).fetchone()
+    if linked_child:
+        roles.append('parent')
+    # Keep only supported portal roles and retain their stable display order.
+    allowed = {'admin','principal','teacher','bursar','librarian','student','parent'}
+    return list(dict.fromkeys(role for role in roles if role in allowed))
 
 
 def current_user():
@@ -846,6 +1049,15 @@ def current_user():
         return None
     user = dict(row)
     user.pop('session_version', None)
+    user['primary_role'] = user.get('role')
+    with db() as c:
+        available_roles = _available_portal_roles(c, user)
+    selected = str(session.get('active_portal_role') or user['primary_role']).lower()
+    if selected not in available_roles:
+        selected = user['primary_role']
+        session.pop('active_portal_role', None)
+    user['available_portal_roles'] = available_roles
+    user['role'] = selected
     return user
 
 
@@ -879,14 +1091,38 @@ def login_required(fn):
 
 
 
+def is_restricted_admin(user, conn=None):
+    if not user or user.get('role') != 'admin' or (user.get('primary_role') or user.get('role')) != 'admin' or is_primary_admin_id(user.get('id'), conn):
+        return False
+    owns_connection = conn is None
+    c = conn or db()
+    try:
+        row=c.execute('SELECT restrict_admin FROM staff_admin_access WHERE user_id=?',(user['id'],)).fetchone()
+        return bool(row and row['restrict_admin'])
+    finally:
+        if owns_connection: c.close()
+
+
 def role_required(*roles):
     def deco(fn):
         @wraps(fn)
         @login_required
         def wrapped(*args, **kwargs):
             user=current_user()
-            if user.get('role') not in roles: return jsonify(error='You do not have permission to perform this action.'),403
-            return fn(*args, **kwargs)
+            restricted_admin = is_restricted_admin(user)
+            if user.get('role') in roles and not restricted_admin:
+                return fn(*args, **kwargs)
+            if user.get('role') in roles and restricted_admin:
+                privilege_key=ENDPOINT_PRIVILEGE_MAP.get(request.endpoint)
+                if privilege_key and has_staff_privilege(user,privilege_key):
+                    return fn(*args, **kwargs)
+            if request.endpoint in ('approval_list','approval_decision'):
+                if any(has_staff_privilege(user,key) for key in ('approve_requests','approve_finance','approve_results')):
+                    return fn(*args, **kwargs)
+            privilege_key=ENDPOINT_PRIVILEGE_MAP.get(request.endpoint)
+            if privilege_key and has_staff_privilege(user,privilege_key):
+                return fn(*args, **kwargs)
+            return jsonify(error='You do not have permission to perform this action.'),403
         return wrapped
     return deco
 
@@ -940,9 +1176,20 @@ def notification_preferences():
             row = c.execute('SELECT email_enabled,preferences_json FROM notification_preferences WHERE user_id=?', (user['id'],)).fetchone()
         preferences = dict(DEFAULT_NOTIFICATION_PREFERENCES)
         if row:
-            preferences.update(json.loads(row['preferences_json'] or '{}'))
+            try:
+                saved_preferences = json.loads(row['preferences_json'] or '{}')
+                if isinstance(saved_preferences, dict): preferences.update(saved_preferences)
+            except (TypeError, ValueError):
+                app.logger.warning('Invalid saved notification preferences for user %s; using defaults', user['id'])
+        try:
+            email_configured = email_provider_is_configured()
+        except Exception:
+            # Notification preferences must remain usable even if encrypted mail
+            # settings need a SECRET_KEY recovery/rotation.
+            app.logger.exception('Email configuration could not be read while loading notification preferences')
+            email_configured = False
         return jsonify(email_enabled=bool(row['email_enabled']) if row else True, categories=preferences,
-                       email_configured=email_provider_is_configured())
+                       email_configured=email_configured)
 
     body = request.get_json(silent=True) or {}
     categories = body.get('categories')
@@ -956,6 +1203,38 @@ def notification_preferences():
             'ON CONFLICT(user_id) DO UPDATE SET email_enabled=excluded.email_enabled,preferences_json=excluded.preferences_json,updated_at=excluded.updated_at',
             (user['id'], int(body['email_enabled']), json.dumps(categories), now()),
         )
+    return jsonify(ok=True)
+
+
+@app.get('/api/notifications')
+@login_required
+def notification_inbox():
+    user = current_user()
+    try:
+        with db() as c:
+            rows = c.execute('SELECT id,category,subject,body,action_label,created_at,read_at FROM in_app_notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 30', (user['id'],)).fetchall()
+            unread = c.execute('SELECT COUNT(*) AS n FROM in_app_notifications WHERE user_id=? AND read_at IS NULL', (user['id'],)).fetchone()['n']
+        return jsonify(items=[dict(row) for row in rows], unread_count=int(unread or 0))
+    except database_errors():
+        app.logger.exception('Could not load in-app notifications')
+        return jsonify(error='In-app notifications are temporarily unavailable.'), 503
+
+
+@app.post('/api/notifications/<notification_id>/read')
+@login_required
+def notification_mark_read(notification_id):
+    user = current_user()
+    with db() as c:
+        updated = c.execute('UPDATE in_app_notifications SET read_at=? WHERE id=? AND user_id=? AND read_at IS NULL', (now(), notification_id, user['id']))
+    return jsonify(ok=True, updated=bool(updated.rowcount))
+
+
+@app.post('/api/notifications/read-all')
+@login_required
+def notification_mark_all_read():
+    user = current_user()
+    with db() as c:
+        c.execute('UPDATE in_app_notifications SET read_at=? WHERE user_id=? AND read_at IS NULL', (now(), user['id']))
     return jsonify(ok=True)
 
 
@@ -1057,6 +1336,9 @@ def approval_create():
         notify_roles(('principal',), 'approvals', 'Approval required',
                      f'A {kind.replace("_", " ")} request is waiting for your review. Sign in to the school portal to review it.',
                      exclude_user_id=current_user()['id'])
+        notify_roles(('admin','bursar'), 'approvals', 'Approval workflow update',
+                     f'A {kind.replace("_", " ")} request has been submitted and is awaiting the Principal’s decision. You can review its status in the approvals area.',
+                     exclude_user_id=current_user()['id'])
     elif kind == 'result_publish':
         notify_roles(('admin', 'principal'), 'approvals', 'Report publication approval required',
                      'A report-card publication request is waiting for review. Sign in to the school portal to review it.',
@@ -1067,7 +1349,17 @@ def approval_create():
 @app.get('/api/approvals')
 @role_required('admin','principal','bursar')
 def approval_list():
+    user=current_user()
     with db() as c: rows=c.execute('SELECT * FROM approval_requests ORDER BY requested_at DESC').fetchall()
+    if user['role'] not in ('admin','principal','bursar'):
+        if has_staff_privilege(user,'approve_requests'):
+            pass
+        elif has_staff_privilege(user,'approve_finance'):
+            rows=[row for row in rows if row['kind'] in ('fee_change','salary_change','salary_payment','curriculum_change')]
+        elif has_staff_privilege(user,'approve_results'):
+            rows=[row for row in rows if row['kind']=='result_publish']
+        else:
+            rows=[]
     return jsonify([dict(r, payload=json.loads(r['payload_json'])) for r in rows])
 
 
@@ -1080,8 +1372,13 @@ def approval_decision(rid):
         row=c.execute('SELECT * FROM approval_requests WHERE id=?',(rid,)).fetchone()
         if not row: return jsonify(error='Approval request not found.'),404
         if row['status']!='pending': return jsonify(error='This request has already been reviewed.'),409
-        if row['kind'] in ('fee_change','salary_change','salary_payment','curriculum_change') and current_user()['role']!='principal': return jsonify(error='This proposal requires Principal approval.'),403
-        if row['kind']=='result_publish' and current_user()['role'] not in ('admin','principal'): return jsonify(error='Report publication requires Admin or Principal approval.'),403
+        actor=current_user()
+        if row['kind'] in ('fee_change','salary_change','salary_payment','curriculum_change') and actor['role']!='principal':
+            if not (has_staff_privilege(actor,'approve_finance') or has_staff_privilege(actor,'approve_requests')) or row['requested_by']==actor['id']:
+                return jsonify(error='This proposal requires Principal approval or a separately assigned financial-approval privilege. A requester cannot approve their own proposal.'),403
+        if row['kind']=='result_publish' and actor['role'] not in ('admin','principal'):
+            if not (has_staff_privilege(actor,'approve_results') or has_staff_privilege(actor,'approve_requests')) or row['requested_by']==actor['id']:
+                return jsonify(error='Report publication requires Admin, Principal or separately assigned result-approval access. A requester cannot approve their own proposal.'),403
         if decision=='approved' and row['kind']=='fee_change':
             proposal=json.loads(row['payload_json']); operation=proposal.get('operation','create')
             if operation=='create':
@@ -1302,13 +1599,22 @@ def audit_log_list():
 @app.get('/api/admin/email-deliveries')
 @role_required('admin')
 def admin_email_deliveries():
+    try:
+        limit = max(1, min(int(request.args.get('limit', 5)), 50))
+        offset = max(0, int(request.args.get('offset', 0)))
+    except (TypeError, ValueError):
+        return jsonify(error='Invalid email-history pagination values.'), 400
     with db() as c:
         rows = c.execute(
             'SELECT l.id,l.recipient,l.subject,l.status,l.error,l.created_at,u.full_name AS actor_name '
             'FROM email_delivery_logs l LEFT JOIN auth_users u ON u.id=l.actor_user_id '
-            'ORDER BY l.created_at DESC LIMIT 50'
+            'ORDER BY l.created_at DESC,l.id DESC LIMIT ? OFFSET ?', (limit + 1, offset)
         ).fetchall()
-    return jsonify([dict(row) for row in rows])
+    has_more = len(rows) > limit
+    response = jsonify([dict(row) for row in rows[:limit]])
+    response.headers['X-Has-More'] = 'true' if has_more else 'false'
+    response.headers['X-Next-Offset'] = str(offset + min(len(rows), limit))
+    return response
 
 
 @app.get('/api/admin/email-settings')
@@ -1358,6 +1664,20 @@ def sync_portal_account_records(conn):
             'INSERT INTO records(id,entity,data,created_date,updated_date) VALUES(?,?,?,?,?)',
             (str(uuid.uuid4()), 'User', json.dumps(data), stamp, stamp),
         )
+    # Ensure every employed portal account has one stable staff-directory record.
+    # This makes Admin/Principal/Bursary/Librarian bank details and payroll use the
+    # same staff ID even if an older account only had a PortalProfile.
+    staff_accounts=conn.execute("SELECT id,email,full_name,role,created_date FROM auth_users WHERE role IN ('teacher','staff','principal','bursar','librarian','admin')").fetchall()
+    for account in staff_accounts:
+        email=str(account['email'] or '').lower()
+        existing=conn.execute("SELECT id FROM records WHERE entity='StaffProfile' AND lower(json_extract(data,'$.email'))=? LIMIT 1",(email,)).fetchone()
+        if existing: continue
+        portal=conn.execute("SELECT data FROM records WHERE entity='PortalProfile' AND lower(json_extract(data,'$.email'))=? ORDER BY updated_date DESC LIMIT 1",(email,)).fetchone()
+        try: profile=json.loads(portal['data']) if portal else {}
+        except (TypeError,ValueError): profile={}
+        profile.update(email=account['email'],full_name=profile.get('full_name') or account['full_name'] or '',role=account['role'],active=True)
+        stamp=account['created_date'] or now()
+        conn.execute('INSERT INTO records(id,entity,data,created_date,updated_date) VALUES(?,?,?,?,?)',(str(uuid.uuid4()),'StaffProfile',json.dumps(profile),stamp,stamp))
 
 
 @app.put('/api/admin/email-settings')
@@ -1458,6 +1778,7 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_portal_users_role_default ON records(entity, lower(COALESCE(json_extract(data,'$.role'),'user')))")
         c.execute("CREATE INDEX IF NOT EXISTS idx_portal_users_status_default ON records(entity, lower(COALESCE(json_extract(data,'$.account_status'),'pending')))")
         c.execute('CREATE INDEX IF NOT EXISTS idx_records_entity ON records(entity)')
+        c.execute("CREATE INDEX IF NOT EXISTS idx_records_assignment_teacher_email ON records(lower(json_extract(data,'$.teacher_email'))) WHERE entity='Assignment'")
         # Query indexes for frequently filtered high-volume records (records exists now).
         c.execute("CREATE INDEX IF NOT EXISTS idx_records_student_class ON records(json_extract(data,'$.class_arm_id')) WHERE entity='Student'")
         c.execute("CREATE INDEX IF NOT EXISTS idx_records_payment_student ON records(json_extract(data,'$.student_id')) WHERE entity='Payment'")
@@ -1591,13 +1912,20 @@ def init_db():
                         c.execute('UPDATE records SET data=?,updated_date=? WHERE id=?',(json.dumps(payload),now(),item['id']))
                 else:
                     c.execute('INSERT INTO records(id,entity,data,created_date,updated_date) VALUES(?,?,?,?,?)',(str(uuid.uuid4()),'User',json.dumps({**dict(owner_email),'is_primary_admin':True}),now(),now()))
+        sync_portal_account_records(c)
 
 
 def admin_required(fn):
     @wraps(fn)
     @login_required
     def wrapped(*args, **kwargs):
-        if current_user().get('role') not in ('admin','principal'): return jsonify(error='You do not have permission to perform this action.'), 403
+        user=current_user()
+        if user.get('role') not in ('admin','principal'):
+            return jsonify(error='You do not have permission to perform this action.'),403
+        if is_restricted_admin(user):
+            privilege_key=ENDPOINT_PRIVILEGE_MAP.get(request.endpoint)
+            if not privilege_key or not has_staff_privilege(user,privilege_key):
+                return jsonify(error='This Admin account is limited to its assigned privileges.'),403
         return fn(*args, **kwargs)
     return wrapped
 
@@ -1823,6 +2151,25 @@ def payment_fee_error(conn, payment):
 
 def can_read(user, entity, row):
     role=user.get('role')
+    read_privileges = {
+        'Student': ('register_students','edit_students','delete_students','manage_documents','manage_student_attendance'),
+        'Assignment': ('assign_teachers','manage_timetable','manage_staff_records'),
+        'ClassArm': ('manage_classes','assign_teachers','manage_timetable','manage_exam_timetable','manage_documents','manage_staff_records','register_students','manage_student_attendance'),
+        'Subject': ('manage_classes','assign_teachers','manage_timetable','manage_exam_timetable','manage_documents','manage_staff_records'),
+        'TimetableEntry': ('manage_timetable',), 'CalendarEvent': ('manage_exam_timetable','manage_notices'),
+        'Attendance': ('manage_student_attendance',), 'Notice': ('manage_notices',),
+        'StudentDocument': ('manage_documents',), 'ResourceItem': ('manage_documents',),
+        'LibraryBook': ('manage_library',), 'LibraryLoan': ('manage_library',),
+        'StaffProfile': ('manage_staff_records','assign_teachers','manage_timetable','manage_staff_attendance'), 'PortalRequest': ('approve_requests','manage_portal_requests'),
+        'FeeItem': ('approve_finance',), 'Payment': ('approve_finance',),
+    }
+    if entity == 'CalendarEvent':
+        calendar_key = 'manage_exam_timetable' if str(row.get('type') or '').casefold() in ('exam','examination') else 'manage_notices'
+        if has_staff_privilege(user,calendar_key): return True
+    if is_restricted_admin(user):
+        return any(has_staff_privilege(user,key) for key in read_privileges.get(entity,()))
+    if any(has_staff_privilege(user,key) for key in read_privileges.get(entity,())):
+        return True
     if entity == 'PortalRequest':
         if role in ('admin','principal','bursar','librarian'): return True
         email=str(user.get('email','')).strip().lower()
@@ -1907,6 +2254,20 @@ def can_read(user, entity, row):
 
 def can_write(user, entity, action, row=None):
     row=row or {}; role=user.get('role')
+    privilege = None
+    if entity == 'Student':
+        privilege = 'register_students' if action == 'create' else ('edit_students' if action == 'update' else 'delete_students')
+    elif entity == 'Assignment': privilege = 'assign_teachers'
+    elif entity in ('ClassArm','Subject'): privilege = 'manage_classes'
+    elif entity == 'TimetableEntry': privilege = 'manage_timetable'
+    elif entity == 'CalendarEvent': privilege = 'manage_exam_timetable' if str(row.get('type') or '').casefold() in ('exam','examination') else 'manage_notices'
+    elif entity == 'Attendance': privilege = 'manage_student_attendance'
+    elif entity == 'Notice': privilege = 'manage_notices'
+    elif entity in ('StudentDocument','ResourceItem'): privilege = 'manage_documents'
+    elif entity in ('LibraryBook','LibraryLoan'): privilege = 'manage_library'
+    elif entity == 'StaffProfile': privilege = 'manage_staff_records'
+    if privilege and has_staff_privilege(user,privilege): return True
+    if is_restricted_admin(user): return False
     if entity == 'PortalRequest':
         if action == 'create':
             return role in ('student','parent')
@@ -2250,6 +2611,7 @@ def admission_application_create():
             return jsonify(error='There is no active class arm for the selected class and track. Contact the school office.'), 400
         c.execute('INSERT INTO admission_applications(id,reference,print_token_hash,application_json,status,exam_date,exam_time,exam_venue,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)', (application_id, reference, sha256(token.encode()).hexdigest(), json.dumps(application), 'exam_scheduled', site['admission_date'], site['admission_time'], site['admission_venue'], stamp, stamp))
     audit({'id': 'public-applicant', 'role': 'public'}, 'admission_application_submitted', 'admission_application', application_id)
+    notify_roles(('admin','principal'), 'admissions', 'New admission application', f'A new admission application ({reference}) has been submitted and needs review.')
     base = public_base_url()
     print_url = f'{base}/admissions/print?token={quote(token)}' if base else ''
     if base:
@@ -2346,10 +2708,7 @@ def admission_application_decision(application_id):
                     return jsonify(error='No active class arm matches the requested class and track. Add one under Admin → Classes & Subjects before admitting this applicant.'), 409
                 _, display_name, arm_id, arm = min(arms, key=lambda item: (item[0], item[1].casefold()))
                 student_id = str(uuid.uuid4())
-                admission_settings_row = c.execute("SELECT data FROM records WHERE entity='SchoolSettings' ORDER BY updated_date DESC LIMIT 1").fetchone()
-                admission_settings = json.loads(admission_settings_row['data']) if admission_settings_row else {}
-                initials = re.sub(r'[^A-Z0-9]', '', str(admission_settings.get('school_initials') or 'SCH').upper())[:8] or 'SCH'
-                admission_no = f"{initials}/{datetime.now().year}/{student_id[:6].upper()}"
+                admission_no = _next_admission_number(c, datetime.now().date().isoformat())
                 student_data = {
                     'full_name': application['student_name'], 'gender': application['gender'],
                     'date_of_birth': application['date_of_birth'], 'admission_date': datetime.now().date().isoformat(),
@@ -2415,7 +2774,27 @@ def auth_login():
 def auth_me():
     user=current_user()
     if not user: return jsonify(error='Please log in to continue.'),401
+    user['is_primary_admin']=is_primary_admin_id(user['id'])
+    user['is_restricted_admin']=is_restricted_admin(user)
+    if (user.get('primary_role') or user.get('role')) in _staff_roles():
+        with db() as c:
+            rows=c.execute("SELECT DISTINCT privilege_key FROM staff_privileges WHERE user_id=? AND revoked_at IS NULL AND starts_at<=? AND (expires_at IS NULL OR expires_at>?)",(user['id'],now(),now())).fetchall()
+        user['active_privileges']=[row['privilege_key'] for row in rows]
+    else:
+        user['active_privileges']=[]
     return jsonify(user)
+
+@app.post('/api/auth/portal-role')
+@login_required
+def auth_switch_portal_role():
+    body = request.get_json(silent=True) or {}
+    requested = str(body.get('role') or '').strip().lower()
+    user = current_user()
+    if requested not in (user.get('available_portal_roles') or []):
+        return jsonify(error='This portal has not been assigned to your account. Ask the Primary Admin to grant it or check your student/teaching link.'), 403
+    session['active_portal_role'] = requested
+    audit(user, 'portal_role_switched', 'auth_user', user['id'], {'from_role': user.get('role'), 'to_role': requested})
+    return jsonify(ok=True, role=requested)
 
 @app.patch('/api/auth/me')
 @login_required
@@ -2570,7 +2949,8 @@ def password_reset():
 @app.get('/api/admin/portal-accounts')
 @role_required('admin')
 def admin_portal_accounts():
-    """Server-side account search for large schools; never sends the full directory."""
+    """Server-side account search for large schools; Primary Admin controls account roles and status."""
+    if not is_primary_admin_id(current_user()['id']): return jsonify(error='Only the Primary Admin can manage portal account roles and statuses.'),403
     query=str(request.args.get('q') or '').strip().lower()[:160]
     role=str(request.args.get('role') or '').strip().lower()
     status=str(request.args.get('status') or '').strip().lower()
@@ -2599,11 +2979,46 @@ def admin_portal_accounts():
         owner=c.execute('SELECT primary_admin_user_id FROM school_security_settings WHERE id=1').fetchone()
         primary_id=owner['primary_admin_user_id'] if owner else None
     items=[]
-    for row in rows:
-        data=json.loads(row['data'] or '{}')
-        data.update(id=row['id'],email=data.get('email') or '',full_name=data.get('full_name') or row['auth_full_name'] or '',role=data.get('role') or row['auth_role'] or 'user',account_status=data.get('account_status') or row['auth_status'] or 'pending',created_date=row['created_date'],updated_date=row['updated_date'],is_primary_admin=bool(primary_id and row['auth_id']==primary_id))
-        items.append(data)
+    with db() as c:
+        for row in rows:
+            data=json.loads(row['data'] or '{}')
+            data.update(id=row['id'],email=data.get('email') or '',full_name=data.get('full_name') or row['auth_full_name'] or '',role=data.get('role') or row['auth_role'] or 'user',account_status=data.get('account_status') or row['auth_status'] or 'pending',created_date=row['created_date'],updated_date=row['updated_date'],is_primary_admin=bool(primary_id and row['auth_id']==primary_id))
+            if row['auth_id']:
+                auth_row = c.execute('SELECT id,email,role FROM auth_users WHERE id=?', (row['auth_id'],)).fetchone()
+                data['portal_roles'] = _available_portal_roles(c, dict(auth_row)) if auth_row else [data['role']]
+                data['granted_portal_roles'] = [x['portal_role'] for x in c.execute('SELECT portal_role FROM user_portal_roles WHERE user_id=? AND revoked_at IS NULL ORDER BY portal_role', (row['auth_id'],)).fetchall()]
+                data['auth_user_id'] = row['auth_id']
+            else:
+                data['portal_roles'] = [data['role']]
+                data['auth_user_id'] = None
+            items.append(data)
     return jsonify(items=items,total=total,page=page,per_page=per_page,total_pages=pages)
+
+
+@app.put('/api/admin/portal-accounts/<user_id>/portal-roles')
+@login_required
+def admin_update_portal_roles(user_id):
+    actor = current_user()
+    if not is_primary_admin_id(actor['id']):
+        return jsonify(error='Only the Primary Admin can assign additional portals.'), 403
+    body = request.get_json(silent=True) or {}
+    roles = body.get('roles')
+    if not isinstance(roles, list) or any(role not in ('teacher','parent') for role in roles) or len(set(roles)) != len(roles):
+        return jsonify(error='Choose Teacher and/or Parent as additional portals.'), 400
+    with db() as c:
+        target = c.execute('SELECT id,email,role,account_status FROM auth_users WHERE id=?', (user_id,)).fetchone()
+        if not target or target['account_status'] != 'active':
+            return jsonify(error='Choose an existing active portal account.'), 404
+        if target['role'] not in _staff_roles():
+            return jsonify(error='Additional Teacher and Parent portals can only be assigned to staff accounts. Student accounts remain separate.'), 403
+        current = {row['portal_role'] for row in c.execute('SELECT portal_role FROM user_portal_roles WHERE user_id=? AND revoked_at IS NULL', (user_id,)).fetchall()}
+        requested = set(roles)
+        for role in requested - current:
+            c.execute('INSERT INTO user_portal_roles(id,user_id,portal_role,granted_by,granted_at) VALUES(?,?,?,?,?)', (str(uuid.uuid4()),user_id,role,actor['id'],now()))
+        for role in current - requested:
+            c.execute('UPDATE user_portal_roles SET revoked_at=? WHERE user_id=? AND portal_role=? AND revoked_at IS NULL', (now(),user_id,role))
+    audit(actor, 'additional_portal_roles_updated', 'auth_user', user_id, {'roles': sorted(roles)})
+    return jsonify(ok=True, roles=[target['role'], *roles])
 
 
 @app.get('/api/entities/<name>')
@@ -2712,10 +3127,17 @@ def entity_bulk_create(name):
                 return jsonify(error='Attendance has already been submitted for this class and date.'),409
         for data in rows:
             data=dict(data)
+            if name == 'Student':
+                if not str(data.get('admission_no') or '').strip():
+                    data['admission_no'] = _next_admission_number(c, data.get('admission_date'))
+                elif not _ensure_unique_admission_number(c, data.get('admission_no')):
+                    return jsonify(error=f"Registration number {data.get('admission_no')} is already in use."),409
+                else:
+                    _sync_admission_counter(c, data.get('admission_no'))
             if name == 'Result' and user['role']!='teacher':
                 return jsonify(error='Only subject teachers may create result rows; every result must pass Form Teacher review.'),403
-            if name == 'User' and str(data.get('role','user')).lower() == 'admin':
-                return jsonify(error='A new Admin account can only be appointed through the Principal-controlled Admin handover process.'),403
+            if name == 'User' and str(data.get('role','user')).lower() == 'admin' and not is_primary_admin_id(user['id'], c):
+                return jsonify(error='Only the Primary Admin can appoint an additional Admin account.'),403
             if not can_write(user,name,'create',data): return jsonify(error='You do not have permission to create these records.'),403
             if name == 'ClassArm' and class_arm_exists(c,data):
                 c.rollback()
@@ -2754,8 +3176,10 @@ def entity_bulk_update(name):
             rid=patch.get('id'); old=c.execute('SELECT * FROM records WHERE id=? AND entity=?',(rid,name)).fetchone()
             if not old: continue
             data=json.loads(old['data'])
-            if name == 'User' and str(patch.get('role', data.get('role','user'))).lower() == 'admin' and str(data.get('role','user')).lower() != 'admin':
-                return jsonify(error='A portal account can only be promoted to Admin through the Principal-controlled Admin handover process.'),403
+            if name == 'User' and set(patch).intersection({'role','account_status'}) and not is_primary_admin_id(user['id'], c):
+                return jsonify(error='Only the Primary Admin can change portal account roles or account status.'),403
+            if name == 'User' and str(patch.get('role', data.get('role','user'))).lower() == 'admin' and str(data.get('role','user')).lower() != 'admin' and not is_primary_admin_id(user['id'], c):
+                return jsonify(error='Only the Primary Admin can appoint an additional Admin account.'),403
             if not can_write(user,name,'update',data): return jsonify(error='You do not have permission to update this record.'),403
             if name == 'Result':
                 result_error=result_admin_change_error(c,user['role'],rid,{k:v for k,v in patch.items() if k!='id'})
@@ -2849,17 +3273,24 @@ def entity_create(name):
         data.update(student_name=student_data.get('full_name',''),class_arm_id=student_data.get('class_arm_id',''),
                     class_arm_name=student_data.get('class_arm_name',''),uploaded_by=user.get('full_name') or user.get('email'))
     if name == 'Result' and user['role']!='teacher': return jsonify(error='Only subject teachers may create result rows; every result must pass Form Teacher review.'),403
-    if name == 'User' and str(data.get('role','user')).lower() == 'admin':
-        return jsonify(error='A new Admin account can only be appointed through the Principal-controlled Admin handover process.'),403
+    if name == 'User' and str(data.get('role','user')).lower() == 'admin' and not is_primary_admin_id(user['id']):
+        return jsonify(error='Only the Primary Admin can appoint an additional Admin account.'),403
     if name == 'ResourceItem':
         data['status']='pending' if user['role']=='teacher' else 'approved'
         if user['role']=='teacher' and not teacher_has_syllabus_assignment(user,data.get('class_arm_id'),data.get('subject_id')):
             return jsonify(error='Upload materials only for a subject and class assigned to you.'),403
     if not can_write(user,name,'create',data): return jsonify(error='You do not have permission to create this record.'),403
-    validation_error = validate_entity(name, data)
-    if validation_error: return jsonify(error=validation_error),400
     rid=str(uuid.uuid4()); stamp=now()
     with db() as c:
+        if name == 'Student':
+            if not str(data.get('admission_no') or '').strip():
+                data['admission_no'] = _next_admission_number(c, data.get('admission_date'))
+            elif not _ensure_unique_admission_number(c, data.get('admission_no')):
+                return jsonify(error=f"Registration number {data.get('admission_no')} is already in use."),409
+            else:
+                _sync_admission_counter(c, data.get('admission_no'))
+        validation_error = validate_entity(name, data)
+        if validation_error: return jsonify(error=validation_error),400
         if name == 'Attendance' and attendance_record_exists(c,data):
             return jsonify(error='Attendance has already been recorded for this student on this date.'),409
         if name == 'Result':
@@ -2873,14 +3304,15 @@ def entity_create(name):
         c.execute('INSERT INTO records(id,entity,data,created_date,updated_date) VALUES(?,?,?,?,?)',(rid,name,json.dumps(data),stamp,stamp))
         if name == 'SchoolSettings': sync_school_settings_period(c,data,user)
     audit(user,f'{name.lower()}_created',name,rid,{'fields':sorted(data.keys())})
+    if name == 'PortalRequest':
+        office_roles = ('admin','principal','bursar') if any(word in str(data.get('subject') or '').lower() for word in ('fee','payment','salary','finance','bank')) else ('admin','principal')
+        notify_roles(office_roles, 'requests', 'A new school request needs attention',
+                     f'{data.get("student_name") or data.get("guardian_name") or "A portal user"} submitted: {data.get("subject") or "School request"}. Open the requests area to review it.',
+                     exclude_user_id=user['id'])
     if name == 'Payment':
         notify_payment_contacts(data)
     elif name == 'Notice':
         notify_notice_recipients(data)
-    elif name == 'PortalRequest':
-        notify_roles(('admin', 'principal', 'bursar', 'librarian'), 'requests', 'New student or parent request',
-                     f'{data.get("student_name") or "A student"} submitted a request for the school office.',
-                     exclude_user_id=user['id'])
     return jsonify(dict(data,id=rid,created_date=stamp,updated_date=stamp)),201
 
 
@@ -2940,15 +3372,17 @@ def entity_update(name,rid):
         old=c.execute('SELECT * FROM records WHERE id=? AND entity=?',(rid,name)).fetchone()
         if not old: return jsonify(error='Record not found.'),404
         data=json.loads(old['data'])
-        if name == 'User' and str(patch.get('role', data.get('role','user'))).lower() == 'admin' and str(data.get('role','user')).lower() != 'admin':
-            return jsonify(error='A portal account can only be promoted to Admin through the Principal-controlled Admin handover process.'),403
+        if name == 'User' and set(patch).intersection({'role','account_status'}) and not is_primary_admin_id(user['id'], c):
+            return jsonify(error='Only the Primary Admin can change portal account roles or account status.'),403
+        if name == 'User' and str(patch.get('role', data.get('role','user'))).lower() == 'admin' and str(data.get('role','user')).lower() != 'admin' and not is_primary_admin_id(user['id'], c):
+            return jsonify(error='Only the Primary Admin can appoint an additional Admin account.'),403
         if name == 'User' and is_primary_admin_email(data.get('email'), c):
             proposed_role=patch.get('role', data.get('role','admin')); proposed_status=patch.get('account_status', data.get('account_status','active'))
             if proposed_role!='admin' or proposed_status!='active': return jsonify(error='The primary school owner cannot be demoted, suspended or deactivated.'),403
             if 'email' in patch and str(patch.get('email','')).lower()!=str(data.get('email','')).lower(): return jsonify(error='The primary owner email must be changed through verified email change.'),403
         if name == 'PortalRequest':
             if set(patch)-{'status','response'}: return jsonify(error='Request ownership and original message cannot be changed.'),403
-            if user['role'] not in ('admin','principal','bursar','librarian'): return jsonify(error='Only the school office may respond to requests.'),403
+            if user['role'] not in ('admin','principal','bursar','librarian') and not has_staff_privilege(user,'approve_requests'): return jsonify(error='Only an authorised school-office account may respond to requests.'),403
             if patch.get('status',data.get('status')) not in ('pending','in_progress','resolved','rejected'): return jsonify(error='Invalid request status.'),400
             if 'response' in patch: patch['handled_by']=user.get('full_name') or user.get('email')
         if not can_write(user,name,'update',data): return jsonify(error='You do not have permission to update this record.'),403
@@ -2997,6 +3431,7 @@ def entity_delete(name,rid):
         if not old: return jsonify(error='Record not found.'),404
         if name == 'User':
             email=str(json.loads(old['data']).get('email','')).lower()
+            if not is_primary_admin_id(user['id'], c): return jsonify(error='Only the Primary Admin can permanently delete portal accounts.'),403
             if is_primary_admin_email(email, c): return jsonify(error='The primary school owner account cannot be deleted.'),403
             if email == current_user()['email'].lower(): return jsonify(error='You cannot delete the account currently signed in.'),400
             c.execute('DELETE FROM auth_users WHERE lower(email)=?',(email,))
@@ -3008,10 +3443,11 @@ def entity_delete(name,rid):
 @app.post('/api/users/invite')
 @admin_required
 def invite_user():
+    if not is_primary_admin_id(current_user()['id']): return jsonify(error='Only the Primary Admin can create or assign portal accounts.'),403
     body=request.get_json(silent=True) or {}; email=str(body.get('email','')).strip().lower(); role=str(body.get('role','user'))
     if not email or not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email): return jsonify(error='Enter a valid email address.'),400
-    allowed={'principal','teacher','bursar','librarian','student','parent'}
-    if role == 'admin': return jsonify(error='Admin accounts cannot be created by invitation. A new Admin must be appointed through the Principal-controlled Admin handover process.'),403
+    allowed={'principal','teacher','bursar','librarian','student','parent','admin'}
+    if role == 'admin' and not is_primary_admin_id(current_user()['id']): return jsonify(error='Only the Primary Admin can appoint an additional Admin account.'),403
     if role not in allowed: return jsonify(error='Invalid portal role.'),400
     with db() as c:
         rows=c.execute("SELECT id,data FROM records WHERE entity='User'").fetchall()
@@ -3027,6 +3463,7 @@ def invite_user():
 @app.post('/api/users/<rid>/resend-invite')
 @admin_required
 def resend_invitation(rid):
+    if not is_primary_admin_id(current_user()['id']): return jsonify(error='Only the Primary Admin can resend portal invitations or password-reset links.'),403
     with db() as c:
         row=c.execute("SELECT data FROM records WHERE id=? AND entity='User'",(rid,)).fetchone()
         if not row: return jsonify(error='Portal account not found.'),404
@@ -3054,6 +3491,7 @@ def resend_invitation(rid):
 @app.delete('/api/users/<rid>')
 @admin_required
 def delete_portal_account(rid):
+    if not is_primary_admin_id(current_user()['id']): return jsonify(error='Only the Primary Admin can permanently delete portal accounts.'),403
     with db() as c:
         row=c.execute("SELECT data FROM records WHERE id=? AND entity='User'",(rid,)).fetchone()
         if not row: return jsonify(error='Portal account not found.'),404
@@ -3164,6 +3602,9 @@ def fee_payment_submissions():
     audit(user,'fee_payment_submitted','fee_payment_submission',sid,{'student_id':student_id,'amount':amount,'fee_id':fee_id,'fee_category':fee_category})
     notify_roles(('principal',), 'finance', 'Fee receipt needs approval',
                  f'{student.get("full_name") or "A student"} submitted a fee payment receipt for review.',
+                 exclude_user_id=user['id'])
+    notify_roles(('admin','bursar'), 'finance', 'Fee receipt awaiting Principal review',
+                 f'A fee-transfer receipt for {student.get("full_name") or "a student"} was submitted. The Principal must review it; check the fee receipt approvals area.',
                  exclude_user_id=user['id'])
     return jsonify(id=sid,status='pending'),201
 
@@ -3750,7 +4191,7 @@ def workflow_timetable_list():
         if user['role'] in ('student','parent'):
             matching=[student for student in linked_students(user) if d['class_key'] in {str(student.get(field) or '') for field in ('class_arm_id','class_arm','class_arm_name','current_class_arm','class_key')}]
             if not any(learner_fee_access(user,student.get('_record_id')) for student in matching): continue
-        if user['role'] not in ('admin','principal','teacher','student','parent'): continue
+        if user['role'] not in ('admin','principal','teacher','student','parent') and not any(has_staff_privilege(user,key) for key in ('manage_timetable','manage_exam_timetable')): continue
         out.append(d)
     return jsonify(out)
 
@@ -3987,11 +4428,95 @@ def account_recovery_link_revoke():
     audit(current_user(),'account_recovery_link_revoked','recovery_link',None)
     return jsonify(ok=True)
 
+@app.get('/api/staff/my-privileges')
+@login_required
+def staff_my_privileges():
+    user=current_user()
+    if user.get('role') not in _staff_roles(): return jsonify([])
+    with db() as c:
+        rows=c.execute("SELECT id,privilege_key,created_at,starts_at,expires_at,note FROM staff_privileges WHERE user_id=? AND revoked_at IS NULL AND starts_at<=? AND (expires_at IS NULL OR expires_at>?) ORDER BY created_at DESC",(user['id'],now(),now())).fetchall()
+    return jsonify([dict(row,label=STAFF_PRIVILEGE_CATALOG.get(row['privilege_key'],(row['privilege_key'],'Unknown privilege'))[0]) for row in rows])
+
+
+@app.get('/api/admin/staff-privileges')
+@login_required
+def admin_staff_privileges_list():
+    user=current_user()
+    if not is_primary_admin_id(user['id']): return jsonify(error='Only the Primary Admin can manage staff privileges.'),403
+    with db() as c:
+        staff=c.execute("SELECT a.id,a.email,a.full_name,a.role,a.account_status,COALESCE(p.restrict_admin,0) AS restrict_admin FROM auth_users a LEFT JOIN staff_admin_access p ON p.user_id=a.id WHERE a.role IN ('teacher','staff','principal','bursar','librarian','admin') AND a.id<>? ORDER BY a.full_name,a.email",(user['id'],)).fetchall()
+        grants=c.execute('SELECT * FROM staff_privileges ORDER BY created_at DESC').fetchall()
+    return jsonify(staff=[dict(row) for row in staff],grants=[dict(row,active=(row['revoked_at'] is None and row['starts_at']<=now() and (row['expires_at'] is None or row['expires_at']>now())),label=STAFF_PRIVILEGE_CATALOG.get(row['privilege_key'],(row['privilege_key'],'Unknown privilege'))[0]) for row in grants],catalog=[{'key':key,'label':value[0],'description':value[1]} for key,value in STAFF_PRIVILEGE_CATALOG.items()])
+
+
+@app.post('/api/admin/staff-access')
+@login_required
+def admin_staff_access_update():
+    actor=current_user()
+    if not is_primary_admin_id(actor['id']): return jsonify(error='Only the Primary Admin can restrict an Admin account.'),403
+    body=request.get_json(silent=True) or {}
+    target=str(body.get('user_id') or '')
+    restricted=body.get('restrict_admin')
+    if not isinstance(restricted,bool): return jsonify(error='Choose whether this Admin account should be limited to assigned privileges.'),400
+    with db() as c:
+        target_row=c.execute('SELECT id,role FROM auth_users WHERE id=?',(target,)).fetchone()
+        if not target_row or target_row['role']!='admin': return jsonify(error='Choose an ordinary Admin account.'),400
+        if target==actor['id'] or is_primary_admin_id(target,c): return jsonify(error='Primary Admin protections cannot be changed here.'),403
+        c.execute('INSERT INTO staff_admin_access(user_id,restrict_admin,updated_by,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET restrict_admin=excluded.restrict_admin,updated_by=excluded.updated_by,updated_at=excluded.updated_at',(target,1 if restricted else 0,actor['id'],now()))
+    audit(actor,'admin_access_restricted' if restricted else 'admin_access_unrestricted','auth_user',target,{'restrict_admin':restricted})
+    return jsonify(ok=True,restrict_admin=restricted)
+
+
+@app.post('/api/admin/staff-privileges')
+@login_required
+def admin_staff_privileges_grant():
+    actor=current_user()
+    if not is_primary_admin_id(actor['id']): return jsonify(error='Only the Primary Admin can grant staff privileges.'),403
+    body=request.get_json(silent=True) or {}
+    target=str(body.get('user_id') or '')
+    key=str(body.get('privilege_key') or '')
+    note=str(body.get('note') or '').strip()[:500]
+    expires=str(body.get('expires_at') or '').strip()
+    if key not in STAFF_PRIVILEGE_CATALOG: return jsonify(error='Choose a supported privilege.'),400
+    if len(note)>500: return jsonify(error='The note is too long.'),400
+    expires_at=None
+    if expires:
+        try:
+            parsed=datetime.strptime(expires,'%Y-%m-%d').replace(hour=23,minute=59,second=59,tzinfo=timezone.utc)
+        except ValueError: return jsonify(error='Expiry date must be a valid calendar date.'),400
+        if parsed <= datetime.now(timezone.utc): return jsonify(error='Expiry date must be in the future.'),400
+        expires_at=parsed.isoformat()
+    with db() as c:
+        target_row=c.execute('SELECT id,role,account_status FROM auth_users WHERE id=?',(target,)).fetchone()
+        if not target_row or target_row['role'] not in _staff_roles() or target_row['account_status']!='active':
+            return jsonify(error='Choose an active staff account. Student and parent accounts cannot receive staff privileges.'),400
+        if target==actor['id']: return jsonify(error='Primary Admin ownership is protected; assign additional duties to another staff account.'),403
+        existing=c.execute("SELECT id FROM staff_privileges WHERE user_id=? AND privilege_key=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?) LIMIT 1",(target,key,now())).fetchone()
+        if existing: return jsonify(error='This staff member already has this active privilege. Edit or withdraw the existing grant first.'),409
+        rid=str(uuid.uuid4()); stamp=now()
+        c.execute('INSERT INTO staff_privileges(id,user_id,privilege_key,granted_by,created_at,starts_at,expires_at,note) VALUES(?,?,?,?,?,?,?,?)',(rid,target,key,actor['id'],stamp,stamp,expires_at,note))
+    audit(actor,'staff_privilege_granted','staff_privilege',rid,{'user_id':target,'privilege_key':key,'expires_at':expires_at,'note':note})
+    return jsonify(id=rid,status='active',expires_at=expires_at),201
+
+
+@app.post('/api/admin/staff-privileges/<grant_id>/withdraw')
+@login_required
+def admin_staff_privileges_withdraw(grant_id):
+    actor=current_user()
+    if not is_primary_admin_id(actor['id']): return jsonify(error='Only the Primary Admin can withdraw staff privileges.'),403
+    with db() as c:
+        row=c.execute('SELECT * FROM staff_privileges WHERE id=? AND revoked_at IS NULL',(grant_id,)).fetchone()
+        if not row: return jsonify(error='Active privilege grant not found.'),404
+        c.execute('UPDATE staff_privileges SET revoked_at=? WHERE id=? AND revoked_at IS NULL',(now(),grant_id))
+    audit(actor,'staff_privilege_withdrawn','staff_privilege',grant_id,{'user_id':row['user_id'],'privilege_key':row['privilege_key']})
+    return jsonify(ok=True,status='withdrawn')
+
+
 @app.get('/api/admin-handover/candidates')
 @role_required('principal')
 def admin_handover_candidates():
     with db() as c:
-        rows=c.execute("SELECT id,email,full_name,role FROM auth_users WHERE role IN ('staff','teacher','bursar','librarian','admin') AND id<>? ORDER BY full_name,email",(current_user()['id'],)).fetchall()
+        rows=c.execute("SELECT id,email,full_name,role FROM auth_users WHERE role IN ('staff','teacher','bursar','librarian','admin') AND account_status='active' AND id<>? ORDER BY full_name,email",(current_user()['id'],)).fetchall()
     return jsonify([dict(r) for r in rows if not is_primary_admin_id(r['id'])])
 
 @app.get('/api/admin-handover')
@@ -4009,17 +4534,34 @@ def admin_handover_mine():
 @app.post('/api/admin-handover')
 @role_required('principal')
 def admin_handover_initiate():
-    b=request.get_json(silent=True) or {}; target=str(b.get('replacement_user_id','')); password=str(b.get('principal_password',''))
+    b=request.get_json(silent=True) or {}
+    target=str(b.get('replacement_user_id',''))
+    password=str(b.get('principal_password',''))
+    reason=str(b.get('reason') or '').strip()
+    if len(reason) < 12 or len(reason) > 1000:
+        return jsonify(error='Explain the emergency and why the Primary Admin is unavailable (12–1000 characters).'),400
     with db() as c:
-        principal=c.execute('SELECT password_hash FROM auth_users WHERE id=?',(current_user()['id'],)).fetchone()
-        if not principal or not check_password_hash(principal['password_hash'],password): return jsonify(error='Principal re-authentication failed.'),403
-        replacement=c.execute('SELECT id,email,role FROM auth_users WHERE id=?',(target,)).fetchone()
+        principal=c.execute('SELECT password_hash,role FROM auth_users WHERE id=?',(current_user()['id'],)).fetchone()
+        if not principal or principal['role'] != 'principal' or not check_password_hash(principal['password_hash'],password):
+            return jsonify(error='Principal re-authentication failed.'),403
+        owner=c.execute('SELECT primary_admin_user_id FROM school_security_settings WHERE id=1').fetchone()
+        owner_id=owner['primary_admin_user_id'] if owner else None
+        if not owner_id:
+            return jsonify(error='Primary Admin ownership is not configured. Contact the system operator for a protected recovery.'),409
+        replacement=c.execute('SELECT id,email,role,account_status FROM auth_users WHERE id=?',(target,)).fetchone()
         if not replacement: return jsonify(error='Replacement account not found.'),404
-        if replacement['role'] not in ('staff','teacher','bursar','librarian','admin'): return jsonify(error='Replacement must be an existing staff account.'),400
-        if is_primary_admin_id(replacement['id'], c): return jsonify(error='The protected primary owner account cannot be used as a replacement through ordinary handover.'),403
-        rid=str(uuid.uuid4()); c.execute('INSERT INTO admin_handover_requests(id,initiated_by,replacement_user_id,status,created_at,details_json) VALUES(?,?,? ,\'pending\',?,?)',(rid,current_user()['id'],target,now(),json.dumps({'initiated_by_email':current_user()['email']})))
-    audit(current_user(),'admin_handover_initiated','admin_handover',rid,{'replacement_user_id':target})
-    return jsonify(id=rid,status='pending'),201
+        if replacement['role'] not in ('staff','teacher','bursar','librarian','admin') or replacement['account_status'] != 'active':
+            return jsonify(error='Replacement must be an active existing staff account.'),400
+        if is_primary_admin_id(replacement['id'], c): return jsonify(error='The current Primary Admin cannot be selected as the replacement.'),403
+        if replacement['id'] == current_user()['id']:
+            return jsonify(error='The Principal cannot nominate their own account as the replacement.'),400
+        pending=c.execute("SELECT id FROM admin_handover_requests WHERE status IN ('pending','accepted') LIMIT 1").fetchone()
+        if pending: return jsonify(error='Another handover request is already in progress.'),409
+        rid=str(uuid.uuid4())
+        details={'initiated_by_email':current_user()['email'],'initiator_role':'principal','mode':'emergency','reason':reason,'previous_primary_admin_user_id':owner_id}
+        c.execute('INSERT INTO admin_handover_requests(id,initiated_by,replacement_user_id,status,created_at,details_json) VALUES(?,?,?,\'pending\',?,?)',(rid,current_user()['id'],target,now(),json.dumps(details)))
+    audit(current_user(),'emergency_admin_handover_initiated','admin_handover',rid,{'replacement_user_id':target,'reason':reason})
+    return jsonify(id=rid,status='pending',mode='emergency'),201
 
 @app.post('/api/admin-handover/<rid>/accept')
 @login_required
@@ -4037,23 +4579,43 @@ def admin_handover_accept(rid):
 @app.post('/api/admin-handover/<rid>/complete')
 @role_required('principal')
 def admin_handover_complete(rid):
+    actor=current_user()
     with db() as c:
-        row=c.execute('SELECT * FROM admin_handover_requests WHERE id=? AND status=\'accepted\'',(rid,)).fetchone()
-        if not row: return jsonify(error='Accepted handover not found.'),404
-        replacement=c.execute('SELECT id,email,full_name FROM auth_users WHERE id=?',(row['replacement_user_id'],)).fetchone()
-        if not replacement: return jsonify(error='Replacement account no longer exists.'),404
-        # Preserve the protected owner by immutable auth user ID, not by email.
+        row=c.execute('SELECT * FROM admin_handover_requests WHERE id=? AND initiated_by=? AND status=\'accepted\'',(rid,actor['id'])).fetchone()
+        if not row: return jsonify(error='Accepted emergency handover not found or not initiated by this Principal.'),404
+        details=json.loads(row['details_json'] or '{}')
+        if details.get('mode') != 'emergency':
+            return jsonify(error='This request is not an emergency succession request.'),409
+        replacement=c.execute('SELECT id,email,full_name,role,account_status FROM auth_users WHERE id=?',(row['replacement_user_id'],)).fetchone()
+        if not replacement or replacement['account_status'] != 'active': return jsonify(error='Replacement account no longer exists or is not active.'),404
         owner_row=c.execute('SELECT primary_admin_user_id FROM school_security_settings WHERE id=1').fetchone()
         owner_id=owner_row['primary_admin_user_id'] if owner_row else None
-        former_admins=c.execute("SELECT id,email FROM auth_users WHERE role='admin' AND id<>? AND (? IS NULL OR id<>?)",(replacement['id'],owner_id,owner_id)).fetchall()
-        c.execute("UPDATE auth_users SET role='staff' WHERE role='admin' AND id<>? AND (? IS NULL OR id<>?)",(replacement['id'],owner_id,owner_id))
-        for former in former_admins:
-            c.execute("UPDATE records SET data=json_set(data,'$.role','staff'),updated_date=? WHERE entity='User' AND lower(json_extract(data,'$.email'))=?",(now(),former['email'].lower()))
-        c.execute("UPDATE auth_users SET role='admin' WHERE id=?",(replacement['id'],))
-        c.execute("UPDATE records SET data=json_set(data,'$.role','admin'),updated_date=? WHERE entity='User' AND lower(json_extract(data,'$.email'))=?",(now(),replacement['email'].lower()))
+        if not owner_id or owner_id != details.get('previous_primary_admin_user_id'):
+            return jsonify(error='Primary Admin ownership changed after this request began. Start a new succession request.'),409
+        # Keep every other administrator and staff role intact. The recipient becomes
+        # Admin if necessary; the immutable owner ID is the source of Primary Admin status.
+        c.execute("UPDATE auth_users SET role='admin',account_status='active' WHERE id=?",(replacement['id'],))
+        # Update the directory JSON in Python so the same code works on SQLite and PostgreSQL.
+        replacement_rows=c.execute("SELECT id,data FROM records WHERE entity='User' AND lower(json_extract(data,'$.email'))=?",(replacement['email'].lower(),)).fetchall()
+        for user_row in replacement_rows:
+            user_data=json.loads(user_row['data'] or '{}')
+            user_data.update(role='admin',account_status='active',is_primary_admin=True)
+            c.execute('UPDATE records SET data=?,updated_date=? WHERE id=?',(json.dumps(user_data),now(),user_row['id']))
+        c.execute('UPDATE school_security_settings SET primary_admin_user_id=?,updated_at=? WHERE id=1',(replacement['id'],now()))
+        # Revoke the former owner's existing sessions; they may sign in again with their
+        # ordinary Admin account, but the old Primary Admin session must not persist.
+        c.execute('UPDATE auth_users SET session_version=session_version+1 WHERE id=?',(owner_id,))
+        old_owner=c.execute('SELECT email FROM auth_users WHERE id=?',(owner_id,)).fetchone()
+        if old_owner:
+            old_rows=c.execute("SELECT id,data FROM records WHERE entity='User' AND lower(json_extract(data,'$.email'))=?",(old_owner['email'].lower(),)).fetchall()
+            for user_row in old_rows:
+                user_data=json.loads(user_row['data'] or '{}')
+                user_data['is_primary_admin']=False
+                c.execute('UPDATE records SET data=?,updated_date=? WHERE id=?',(json.dumps(user_data),now(),user_row['id']))
         c.execute("UPDATE admin_handover_requests SET status='completed',completed_at=? WHERE id=?",(now(),rid))
-    audit(current_user(),'admin_handover_completed','admin_handover',rid,{'replacement_user_id':replacement['id']})
-    return jsonify(ok=True,status='completed')
+    audit(actor,'emergency_admin_handover_completed','admin_handover',rid,{'previous_primary_admin_user_id':owner_id,'replacement_user_id':replacement['id'],'reason':details.get('reason','')})
+    notify_roles(('admin','principal'),'operations','Emergency Primary Admin succession completed',f"{replacement['full_name'] or replacement['email']} is now the Primary Admin. The school records and other staff roles were preserved.")
+    return jsonify(ok=True,status='completed',primary_admin_user_id=replacement['id'])
 
 
 @app.post('/api/account/email-change/request')
@@ -4152,6 +4714,9 @@ def finance_school_accounts():
         if duplicate: return jsonify(error='This bank account is already pending or active for that payment purpose.'),409
         c.execute('INSERT INTO school_payment_accounts(id,bank_name,account_name,account_number,purpose,instructions,status,submitted_by,submitted_at) VALUES(?,?,?,?,?,?,?,?,?)',(rid,bank,name,number,purpose,instructions,'pending',user['id'],now()))
     audit(user,'school_payment_account_submitted','school_payment_account',rid,{'bank_name':bank,'purpose':purpose})
+    notify_roles(('principal','admin'), 'approvals', 'School bank account needs approval',
+                 f'The Bursary submitted a {purpose.replace("_", " ")} bank account for approval. Review it in the school payment accounts area.',
+                 exclude_user_id=user['id'])
     return jsonify(ok=True,id=rid,status='pending',message='School payment account submitted for Principal approval.'),201
 
 @app.post('/api/finance/school-accounts/<rid>/decision')
@@ -4170,45 +4735,114 @@ def finance_school_account_decision(rid):
             status='active' if decision == 'approved' else 'rejected'
         c.execute('UPDATE school_payment_accounts SET status=?,reviewed_by=?,reviewed_at=?,decision_note=? WHERE id=?',(status,current_user()['id'],now(),str(body.get('note') or '')[:1000],rid))
     audit(current_user(),'school_payment_account_'+status,'school_payment_account',rid,{'bank_name':row['bank_name'],'purpose':row['purpose']})
+    notify_user(row['submitted_by'], 'finance', f'School bank account {status}',
+                f'Your proposed school bank account for {row["purpose"].replace("_", " ")} was {status}.')
+    notify_roles(('admin','bursar'), 'approvals', 'School bank account decision recorded',
+                 f'The Principal {status} a proposed {row["purpose"].replace("_", " ")} bank account.',
+                 exclude_user_id=current_user()['id'])
     return jsonify(ok=True,status=status)
 
 @app.route('/api/payroll/my-bank-details', methods=['GET','PUT'])
 @login_required
 def payroll_my_bank_details():
     user=current_user()
-    if user['role'] not in _staff_roles(): return jsonify(error='Only staff accounts can manage salary bank details.'),403
+    if (user.get('primary_role') or user['role']) not in _staff_roles(): return jsonify(error='Only staff accounts can manage salary bank details.'),403
     with db() as c:
         staff=_staff_record_for_user(c,user)
         if not staff: return jsonify(error='Your staff profile is not linked to this login. Ask the school administrator to link it before adding payment details.'),404
         row=c.execute('SELECT encrypted_payload FROM staff_bank_details WHERE staff_id=?',(staff['id'],)).fetchone()
+        pending = c.execute("SELECT id,status,submitted_at,decision_note FROM staff_bank_change_requests WHERE staff_id=? AND status='pending' ORDER BY submitted_at DESC LIMIT 1", (staff['id'],)).fetchone()
         if request.method == 'GET':
-            if not row: return jsonify(bank_name='',account_name='',account_number='')
-            try: return jsonify(json.loads(_bank_cipher().decrypt(row['encrypted_payload'].encode()).decode()))
-            except (InvalidToken,ValueError): return jsonify(error='Stored bank details cannot be decrypted. Contact the system administrator; do not overwrite them.'),500
+            details = {'bank_name':'','account_name':'','account_number':''}
+            if row:
+                try: details = json.loads(_bank_cipher().decrypt(row['encrypted_payload'].encode()).decode())
+                except (InvalidToken,ValueError): return jsonify(error='Stored bank details cannot be decrypted. Contact the system administrator; do not overwrite them.'),500
+            details['pending_change'] = dict(pending) if pending else None
+            return jsonify(details)
         body=request.get_json(silent=True) or {}
         bank=str(body.get('bank_name') or '').strip(); name=str(body.get('account_name') or '').strip(); number=re.sub(r'\s+','',str(body.get('account_number') or ''))
         if not bank or len(bank)>100 or not name or len(name)>150 or not re.fullmatch(r'\d{10}',number): return jsonify(error='Enter a valid bank name, account name and 10-digit Nigerian account number.'),400
+        if pending:
+            return jsonify(error='You already have a bank-detail change waiting for Bursary review. Wait for the decision before submitting another change.'),409
         payload={'bank_name':bank,'account_name':name,'account_number':number}
         encrypted=_bank_cipher().encrypt(json.dumps(payload).encode()).decode()
-        c.execute('INSERT INTO staff_bank_details(staff_id,encrypted_payload,updated_at,updated_by) VALUES(?,?,?,?) ON CONFLICT(staff_id) DO UPDATE SET encrypted_payload=excluded.encrypted_payload,updated_at=excluded.updated_at,updated_by=excluded.updated_by',(staff['id'],encrypted,now(),user['id']))
-    audit(user,'staff_bank_details_updated','StaffProfile',staff['id'],{'bank_name':bank})
-    return jsonify(ok=True,message='Your payment details have been saved securely.',bank_name=bank,account_name=name,account_number=f'******{number[-4:]}')
+        request_id=str(uuid.uuid4())
+        try:
+            c.execute('INSERT INTO staff_bank_change_requests(id,staff_id,user_id,encrypted_payload,status,submitted_at) VALUES(?,?,?,?,?,?)',(request_id,staff['id'],user['id'],encrypted,'pending',now()))
+        except integrity_errors():
+            c.rollback()
+            return jsonify(error='A bank-detail change is already waiting for Bursary review.'),409
+    audit(user,'staff_bank_details_change_submitted','StaffProfile',staff['id'],{'bank_name':bank,'request_id':request_id})
+    notify_roles(('bursar',), 'finance', 'Staff bank details need review',
+                 f'{user.get("full_name") or user.get("email")} submitted updated salary bank details. Review the pending bank-detail change in Bursary → Staff bank details.',
+                 exclude_user_id=user['id'])
+    return jsonify(ok=True,status='pending',message='Your updated bank details were sent to the Bursary for review. Your current approved details remain active until approval.',bank_name=bank,account_name=name,account_number=f'******{number[-4:]}')
 
 @app.get('/api/payroll/staff-bank-details')
 @role_required('bursar')
 def payroll_staff_bank_details():
+    """Only Bursary can decrypt staff payout details; include Admin login accounts too."""
     with db() as c:
-        rows=c.execute("SELECT r.id,r.data,s.encrypted_payload,s.updated_at FROM records r LEFT JOIN staff_bank_details s ON s.staff_id=r.id WHERE r.entity='StaffProfile' ORDER BY json_extract(r.data,'$.full_name') COLLATE NOCASE").fetchall()
+        sync_portal_account_records(c)
+        staff_rows=c.execute("SELECT r.id,r.data,s.encrypted_payload,s.updated_at FROM records r LEFT JOIN staff_bank_details s ON s.staff_id=r.id WHERE r.entity='StaffProfile' ORDER BY json_extract(r.data,'$.full_name') COLLATE NOCASE").fetchall()
+        auth_rows=c.execute("SELECT id,email,full_name,role,account_status FROM auth_users WHERE role IN ('teacher','staff','principal','bursar','librarian','admin') ORDER BY full_name,email").fetchall()
         output=[]
-        for row in rows:
+        seen_emails=set()
+        for row in staff_rows:
             try: profile=json.loads(row['data'])
             except Exception: continue
+            email=str(profile.get('email') or '').lower()
+            seen_emails.add(email)
             details={}
             if row['encrypted_payload']:
                 try: details=json.loads(_bank_cipher().decrypt(row['encrypted_payload'].encode()).decode())
                 except (InvalidToken,ValueError): details={'error':'Unable to decrypt stored details'}
             output.append({'staff_id':row['id'],'staff_name':profile.get('full_name') or 'Staff member','role':profile.get('role') or '', 'email':profile.get('email') or '', 'bank_name':details.get('bank_name',''),'account_name':details.get('account_name',''),'account_number':details.get('account_number',''),'updated_at':row['updated_at'] or ''})
+        for account in auth_rows:
+            email=str(account['email'] or '').lower()
+            if email in seen_emails: continue
+            bank_row=c.execute('SELECT encrypted_payload,updated_at FROM staff_bank_details WHERE staff_id=?',(account['id'],)).fetchone()
+            details={}
+            if bank_row and bank_row['encrypted_payload']:
+                try: details=json.loads(_bank_cipher().decrypt(bank_row['encrypted_payload'].encode()).decode())
+                except (InvalidToken,ValueError): details={'error':'Unable to decrypt stored details'}
+            output.append({'staff_id':account['id'],'staff_name':account['full_name'] or 'Staff member','role':account['role'] or '', 'email':account['email'] or '', 'bank_name':details.get('bank_name',''),'account_name':details.get('account_name',''),'account_number':details.get('account_number',''),'updated_at':(bank_row['updated_at'] if bank_row else '') or ''})
     return jsonify(output)
+
+
+@app.get('/api/payroll/staff-bank-change-requests')
+@role_required('bursar')
+def payroll_staff_bank_change_requests():
+    with db() as c:
+        rows = c.execute("SELECT q.*,a.email,a.full_name,a.role FROM staff_bank_change_requests q LEFT JOIN auth_users a ON a.id=q.user_id WHERE q.status='pending' ORDER BY q.submitted_at ASC").fetchall()
+    output=[]
+    for row in rows:
+        try: details=json.loads(_bank_cipher().decrypt(row['encrypted_payload'].encode()).decode())
+        except (InvalidToken,ValueError): details={'error':'Unable to decrypt submitted bank details'}
+        output.append({'id':row['id'],'staff_id':row['staff_id'],'staff_name':row['full_name'] or row['email'],'email':row['email'],'role':row['role'],'submitted_at':row['submitted_at'],**details})
+    return jsonify(output)
+
+
+@app.post('/api/payroll/staff-bank-change-requests/<request_id>/decision')
+@role_required('bursar')
+def payroll_staff_bank_change_decision(request_id):
+    body=request.get_json(silent=True) or {}
+    decision=str(body.get('decision') or '').lower()
+    if decision not in ('approved','rejected'):
+        return jsonify(error='Choose approved or rejected.'),400
+    actor=current_user()
+    with db() as c:
+        row=c.execute("SELECT * FROM staff_bank_change_requests WHERE id=? AND status='pending'",(request_id,)).fetchone()
+        if not row: return jsonify(error='Pending bank-detail change was not found.'),404
+        if row['user_id']==actor['id']: return jsonify(error='You cannot approve or reject your own bank-detail change.'),403
+        if decision=='approved':
+            c.execute('INSERT INTO staff_bank_details(staff_id,encrypted_payload,updated_at,updated_by) VALUES(?,?,?,?) ON CONFLICT(staff_id) DO UPDATE SET encrypted_payload=excluded.encrypted_payload,updated_at=excluded.updated_at,updated_by=excluded.updated_by',(row['staff_id'],row['encrypted_payload'],now(),actor['id']))
+        c.execute('UPDATE staff_bank_change_requests SET status=?,reviewed_by=?,reviewed_at=?,decision_note=? WHERE id=?',(decision,actor['id'],now(),str(body.get('note') or '')[:1000],request_id))
+        target=c.execute('SELECT id,email FROM auth_users WHERE id=?',(row['user_id'],)).fetchone()
+    audit(actor,'staff_bank_details_change_'+decision,'StaffProfile',row['staff_id'],{'request_id':request_id,'note':str(body.get('note') or '')[:1000]})
+    if target:
+        notify_user(target['id'],'finance',f'Staff bank details {decision}',f'Your updated salary bank details were {decision} by the Bursary.'+(f' Note: {body.get("note")}' if body.get('note') else ''))
+    return jsonify(ok=True,status=decision)
 
 @app.get('/api/payroll/history')
 @login_required
@@ -4354,7 +4988,7 @@ def curriculum_documents_list():
         with db() as c:
             assigned_scopes={canonical_class_scope(c,class_key) for class_key in assigned}
             rows=[r for r in rows if canonical_class_scope(c,r['class_key']) in assigned_scopes]
-    elif user['role'] not in ('admin','principal'):
+    elif user['role'] not in ('admin','principal') and not has_staff_privilege(user,'manage_documents'):
         rows=[]
     return jsonify([dict(r) for r in rows])
 

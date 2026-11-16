@@ -70,6 +70,131 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         return response
 
+
+    def test_registration_numbers_continue_after_999_and_are_year_scoped(self):
+        with app.db() as conn:
+            self.add_record(conn, 'SchoolSettings', {'school_initials': 'SCH'})
+            self.add_record(conn, 'Student', {'full_name': 'Existing 999', 'admission_date': '2026-02-01', 'admission_no': 'SCH/2026/999'})
+            self.assertEqual(app._next_admission_number(conn, '2026-02-01'), 'SCH/2026/1000')
+            self.assertEqual(app._next_admission_number(conn, '2026-02-02'), 'SCH/2026/1001')
+            self.assertEqual(app._next_admission_number(conn, '2027-01-01'), 'SCH/2027/001')
+
+    def test_email_history_defaults_to_five_and_supports_more(self):
+        self.login()
+        with app.db() as conn:
+            for index in range(7):
+                conn.execute(
+                    'INSERT INTO email_delivery_logs(id,recipient,subject,status,error,actor_user_id,created_at) VALUES(?,?,?,?,?,?,?)',
+                    (str(uuid.uuid4()), f'person{index}@school.test', f'Message {index}', 'sent', None, 'admin-user', app.now()),
+                )
+            old_id=str(uuid.uuid4())
+            conn.execute(
+                'INSERT INTO email_delivery_logs(id,recipient,subject,status,error,actor_user_id,created_at) VALUES(?,?,?,?,?,?,?)',
+                (old_id, 'older@school.test', 'Older retained message', 'sent', None, 'admin-user', '2025-01-01T00:00:00+00:00'),
+            )
+        app.log_email_delivery('new@school.test', 'New message', 'sent')
+        first = self.client.get('/api/admin/email-deliveries')
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(len(first.get_json()), 5)
+        self.assertEqual(first.headers.get('X-Has-More'), 'true')
+        second = self.client.get('/api/admin/email-deliveries?limit=5&offset=5')
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(second.get_json()), 4)
+        self.assertIn(old_id, [row['id'] for row in second.get_json()])
+        self.assertEqual(second.headers.get('X-Has-More'), 'false')
+
+    def test_admin_can_save_bank_details_and_only_bursary_can_view_them(self):
+        self.login()
+        initial = self.client.get('/api/payroll/my-bank-details')
+        self.assertEqual(initial.status_code, 200, initial.get_json())
+        saved = self.client.put('/api/payroll/my-bank-details', json={
+            'bank_name': 'Example Bank', 'account_name': 'School Administrator', 'account_number': '1234567890',
+        })
+        self.assertEqual(saved.status_code, 200, saved.get_json())
+        self.assertEqual(saved.get_json()['status'], 'pending')
+        self.assertEqual(saved.get_json()['account_number'], '******7890')
+        self.client.post('/api/auth/logout')
+        self.add_account('bursar@school.test', 'bursar')
+        self.login('bursar@school.test', self.password)
+        pending = self.client.get('/api/payroll/staff-bank-change-requests')
+        self.assertEqual(pending.status_code, 200, pending.get_json())
+        self.assertEqual(len(pending.get_json()), 1)
+        decision = self.client.post(f"/api/payroll/staff-bank-change-requests/{pending.get_json()[0]['id']}/decision", json={'decision':'approved'})
+        self.assertEqual(decision.status_code, 200, decision.get_json())
+        rows = self.client.get('/api/payroll/staff-bank-details')
+        self.assertEqual(rows.status_code, 200, rows.get_json())
+        admin_row = next((row for row in rows.get_json() if row['email'] == 'admin@school.local'), None)
+        self.assertIsNotNone(admin_row)
+        self.assertEqual(admin_row['account_number'], '1234567890')
+        self.client.post('/api/auth/logout')
+        self.login('principal@school.test', self.password)
+        self.assertEqual(self.client.get('/api/payroll/staff-bank-details').status_code, 403)
+
+    def test_primary_admin_can_grant_and_withdraw_temporary_staff_privilege(self):
+        staff_id = self.add_account('attendance.staff@school.test', 'teacher')
+        self.login()
+        grant = self.client.post('/api/admin/staff-privileges', json={
+            'user_id': staff_id, 'privilege_key': 'manage_staff_attendance',
+            'expires_at': '2099-12-31', 'note': 'Temporary cover',
+        })
+        self.assertEqual(grant.status_code, 201, grant.get_json())
+        self.client.post('/api/auth/logout')
+        self.login('attendance.staff@school.test', self.password)
+        self.assertEqual(self.client.get('/api/workflows/staff-attendance').status_code, 200)
+        self.client.post('/api/auth/logout')
+        self.login()
+        withdrawn = self.client.post(f"/api/admin/staff-privileges/{grant.get_json()['id']}/withdraw", json={})
+        self.assertEqual(withdrawn.status_code, 200, withdrawn.get_json())
+        self.client.post('/api/auth/logout')
+        self.login('attendance.staff@school.test', self.password)
+        self.assertEqual(self.client.get('/api/workflows/staff-attendance').status_code, 403)
+
+    def test_emergency_handover_transfers_primary_owner_without_demoting_other_admins(self):
+        principal_id = None
+        with app.db() as conn:
+            principal_id = conn.execute("SELECT id FROM auth_users WHERE lower(email)='principal@school.test'").fetchone()['id']
+        replacement_id = self.add_account('successor@school.test', 'teacher')
+        other_admin_id = self.add_account('another.admin@school.test', 'admin')
+        self.login('principal@school.test', self.password)
+        initiated = self.client.post('/api/admin-handover', json={
+            'replacement_user_id': replacement_id,
+            'principal_password': self.password,
+            'reason': 'The Primary Admin is unavailable due to a serious medical emergency.',
+        })
+        self.assertEqual(initiated.status_code, 201, initiated.get_json())
+        request_id = initiated.get_json()['id']
+        self.client.post('/api/auth/logout')
+        self.login('successor@school.test', self.password)
+        accepted = self.client.post(f'/api/admin-handover/{request_id}/accept', json={'password': self.password})
+        self.assertEqual(accepted.status_code, 200, accepted.get_json())
+        self.client.post('/api/auth/logout')
+        self.login('principal@school.test', self.password)
+        completed = self.client.post(f'/api/admin-handover/{request_id}/complete', json={})
+        self.assertEqual(completed.status_code, 200, completed.get_json())
+        with app.db() as conn:
+            owner = conn.execute('SELECT primary_admin_user_id FROM school_security_settings WHERE id=1').fetchone()['primary_admin_user_id']
+            old_owner = conn.execute("SELECT role FROM auth_users WHERE lower(email)='admin@school.local'").fetchone()['role']
+            other_admin = conn.execute('SELECT role FROM auth_users WHERE id=?', (other_admin_id,)).fetchone()['role']
+            successor_role = conn.execute('SELECT role FROM auth_users WHERE id=?', (replacement_id,)).fetchone()['role']
+        self.assertEqual(owner, replacement_id)
+        self.assertEqual(old_owner, 'admin')
+        self.assertEqual(other_admin, 'admin')
+        self.assertEqual(successor_role, 'admin')
+
+    def test_primary_admin_can_restrict_an_ordinary_admin(self):
+        admin_id = self.add_account('limited.admin@school.test', 'admin')
+        self.login()
+        restricted = self.client.post('/api/admin/staff-access', json={'user_id': admin_id, 'restrict_admin': True})
+        self.assertEqual(restricted.status_code, 200, restricted.get_json())
+        grant = self.client.post('/api/admin/staff-privileges', json={
+            'user_id': admin_id, 'privilege_key': 'manage_staff_attendance', 'expires_at': '2099-12-31',
+        })
+        self.assertEqual(grant.status_code, 201, grant.get_json())
+        self.client.post('/api/auth/logout')
+        self.login('limited.admin@school.test', self.password)
+        self.assertEqual(self.client.get('/api/admin/portal-accounts').status_code, 403)
+        self.assertEqual(self.client.get('/api/workflows/staff-attendance').status_code, 200)
+
     def test_api_mutations_require_csrf_and_security_headers_are_set(self):
         response=FlaskClient(app.app).post('/api/auth/login',json={'email':'admin@school.local','password':'Admin123!'})
         self.assertEqual(response.status_code,403)
@@ -268,7 +393,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
 
         with patch.object(app, 'send_mail', return_value=(True, None)) as send_mail:
-            self.assertFalse(app.notify_user(user_id, 'finance', 'Test', 'Test message'))
+            self.assertTrue(app.notify_user(user_id, 'finance', 'Test', 'Test message'))  # in-app alert is still stored
             send_mail.assert_not_called()
             self.assertTrue(app.notify_user(user_id, 'notices', 'Test', 'Test message'))
             send_mail.assert_called_once_with('parent@school.test', 'Test', 'Test message')
@@ -282,8 +407,89 @@ class WorkflowTests(unittest.TestCase):
                 'payload': {'operation': 'create', 'name': 'Test fee', 'amount': 100},
             })
         self.assertEqual(response.status_code, 201, response.get_json())
-        self.assertEqual(send_mail.call_count, 1)
-        self.assertEqual(send_mail.call_args.args[0], 'principal@school.test')
+        self.assertEqual(send_mail.call_count, 2)
+        recipients = {call.args[0] for call in send_mail.call_args_list}
+        self.assertEqual(recipients, {'principal@school.test', 'admin@school.local'})
+
+    def test_notification_preferences_still_load_when_saved_email_config_cannot_decrypt(self):
+        self.login('principal@school.test', self.password)
+        with patch.object(app, 'smtp_config', side_effect=RuntimeError('Saved email provider settings cannot be decrypted')):
+            response = self.client.get('/api/notifications/preferences')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertFalse(response.get_json()['email_configured'])
+        self.assertTrue(response.get_json()['email_enabled'])
+
+    def test_notifications_are_stored_in_app_even_when_email_is_disabled(self):
+        user_id = self.add_account('notify@school.test', 'principal')
+        with app.db() as conn:
+            conn.execute('INSERT INTO notification_preferences(user_id,email_enabled,preferences_json,updated_at) VALUES(?,?,?,?)',
+                         (user_id, 0, json.dumps(app.DEFAULT_NOTIFICATION_PREFERENCES), app.now()))
+        with patch.object(app, 'send_mail') as send_mail:
+            app.notify_user(user_id, 'approvals', 'Approval needed', 'Please review this item.')
+        send_mail.assert_not_called()
+        with app.db() as conn:
+            row = conn.execute('SELECT subject,read_at FROM in_app_notifications WHERE user_id=?', (user_id,)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row['subject'], 'Approval needed')
+        self.assertIsNone(row['read_at'])
+
+    def test_in_app_notification_inbox_can_mark_items_read(self):
+        user_id = self.add_account('inbox@school.test', 'principal')
+        with patch.object(app, 'send_mail', return_value=(True, None)):
+            app.notify_user(user_id, 'approvals', 'Please review', 'A school item needs your attention.')
+        self.login('inbox@school.test', self.password)
+        response = self.client.get('/api/notifications')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()['unread_count'], 1)
+        notification_id = response.get_json()['items'][0]['id']
+        marked = self.client.post(f'/api/notifications/{notification_id}/read', json={})
+        self.assertEqual(marked.status_code, 200, marked.get_json())
+        self.assertEqual(self.client.get('/api/notifications').get_json()['unread_count'], 0)
+
+    def test_primary_admin_can_grant_additional_parent_portal_in_account_directory(self):
+        staff_id = self.add_account('portal-staff@school.test', 'teacher')
+        with app.db() as conn:
+            record_id = self.add_record(conn, 'User', {'email':'portal-staff@school.test','role':'teacher','account_status':'active'})
+        self.login()
+        grant = self.client.put(f'/api/admin/portal-accounts/{staff_id}/portal-roles', json={'roles':['parent']})
+        self.assertEqual(grant.status_code, 200, grant.get_json())
+        directory = self.client.get('/api/admin/portal-accounts?q=portal-staff%40school.test')
+        self.assertEqual(directory.status_code, 200, directory.get_json())
+        account = next(item for item in directory.get_json()['items'] if item['id'] == record_id)
+        self.assertEqual(account['granted_portal_roles'], ['parent'])
+
+    def test_staff_can_switch_between_primary_and_additional_parent_portal(self):
+        staff_id = self.add_account('staff-parent@school.test', 'principal')
+        with app.db() as conn:
+            self.add_record(conn, 'Student', {'full_name':'Linked Child','guardian_email':'staff-parent@school.test'})
+            self.add_record(conn, 'Assignment', {'teacher_email':'staff-parent@school.test','type':'subject'})
+            conn.execute('INSERT INTO user_portal_roles(id,user_id,portal_role,granted_by,granted_at) VALUES(?,?,?,?,?)',
+                         (str(uuid.uuid4()), staff_id, 'parent', 'primary-admin', app.now()))
+        self.login('staff-parent@school.test', self.password)
+        me = self.client.get('/api/auth/me').get_json()
+        self.assertIn('principal', me['available_portal_roles'])
+        self.assertIn('parent', me['available_portal_roles'])
+        self.assertIn('teacher', me['available_portal_roles'])
+        teacher_switch = self.client.post('/api/auth/portal-role', json={'role':'teacher'})
+        self.assertEqual(teacher_switch.status_code, 200, teacher_switch.get_json())
+        switched = self.client.post('/api/auth/portal-role', json={'role':'parent'})
+        self.assertEqual(switched.status_code, 200, switched.get_json())
+        self.assertEqual(self.client.get('/api/auth/me').get_json()['role'], 'parent')
+        switched_back = self.client.post('/api/auth/portal-role', json={'role':'principal'})
+        self.assertEqual(switched_back.status_code, 200, switched_back.get_json())
+        self.assertEqual(self.client.get('/api/auth/me').get_json()['primary_role'], 'principal')
+
+    def test_primary_admin_role_update_does_not_fail_when_email_config_is_broken(self):
+        target_id = self.add_account('role-change@school.test', 'teacher')
+        with app.db() as conn:
+            record_id = self.add_record(conn, 'User', {'email':'role-change@school.test','role':'teacher','account_status':'active'})
+        self.login()
+        with patch.object(app, 'smtp_config', side_effect=RuntimeError('bad encrypted config')):
+            response = self.client.patch(f'/api/entities/User/{record_id}', json={'role':'principal'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        with app.db() as conn:
+            account = conn.execute('SELECT role FROM auth_users WHERE id=?', (target_id,)).fetchone()
+        self.assertEqual(account['role'], 'principal')
 
     def test_school_logo_upload_is_publicly_readable(self):
         filename = f'test-logo-{uuid.uuid4().hex}.png'
