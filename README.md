@@ -97,7 +97,7 @@ The backend supports PostgreSQL through `DATABASE_URL` and SQLite fallback, sess
 ## Finance and admissions workflows
 
 - Financial approvals for fee changes, salary changes/payments, and curriculum changes are decided by the Principal. The Admin can review non-financial report-publication requests.
-- Installments are disabled by default. Bursary can propose enabling installments for each fee; the policy takes effect only after Principal approval. Partial payment amounts are checked against the selected student, fee, session and term. Bank receipts also require Principal review before they become ledger payments.
+- Installments are disabled by default. Bursary can propose enabling installments for each fee; the policy takes effect only after Principal approval. Partial payment amounts are checked against the selected student, fee, session and term. **Student bank-transfer receipts are reviewed and approved/rejected by Bursary only.** The Principal can search and view student payment history but cannot decide individual receipts. Only an approved Bursary receipt creates the official ledger payment and changes the recorded balance.
 - The public homepage and admission schedule are editable in Admin settings. Online applications are available only when Admin activates admissions and sets a valid examination date, time and venue. The schedule appears on the public homepage and on each applicant's printable letter. Admin can change an individual appointment from Admin → Admissions; the guardian is emailed about the update when a school email provider is configured. Admin records the result after the exam; passing creates a student record in the least-populated active class arm matching the requested level and track.
 - After an application is submitted, the guardian receives an email with the schedule and application details only when a school email provider is configured. The local app does not run an automatic reminder on exam day; keep the server running for the application flow and contact families directly if no email is configured or delivered.
 
@@ -182,7 +182,7 @@ Back up `school.db` and `uploads/` before updating, as always. This update uses 
 
 - The Bursary → School bank accounts page lets the bursar submit school bank account details. New details are not published immediately: they remain pending until the Principal approves them.
 - Parents and students see approved school accounts in the Finance section. They can copy the account number and use the existing fee receipt submission workflow to upload transfer evidence.
-- A transfer receipt is a claim, not proof of settlement. Only a Principal-approved submission creates the official payment record and changes the recorded balance.
+- A transfer receipt is a claim, not proof of settlement. Bursary must verify it and approve it before an official payment record is created and the recorded balance changes. Principal access to student payment records is read-only.
 - Account changes should be submitted as a new proposal. The previous approved account remains available until the new proposal is approved. Principal/Admin can reject proposals; deactivation is available through the account decision API.
 
 ### Staff bank details
@@ -237,3 +237,8 @@ The code changes add PostgreSQL connectivity and Neon-backed private file storag
 - New Flask workflow regression tests: ADDED BUT NOT EXECUTED because Flask/Werkzeug are not installed in this execution environment and package installation is blocked by unavailable network access.
 - Frontend build/lint: NOT EXECUTED because npm dependencies are not fully cached and registry access is unavailable. Dockerfile and Render Blueprint were preserved unchanged; Docker will rebuild the frontend from source during deployment.
 - Live Neon migration, Render startup, browser workflow, and production handover: NOT TESTED. Deploy first to a safe preview/test service and verify before replacing the current live deployment.
+
+
+## Offline operation status
+
+The current release is an online-first web application. It does not yet provide trusted-device offline login, an IndexedDB data store, an offline mutation outbox, automatic reconnect synchronisation, or conflict resolution. Do not rely on the browser cache to enter attendance, results, payments, or other records while disconnected. Offline-first support remains a separate implementation and device-testing requirement.

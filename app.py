@@ -744,7 +744,7 @@ def notify_notice_recipients(notice):
                      f'{notice.get("body") or ""}\n\nAudience: {audience}.')
 
 
-def payment_notification_body(payment):
+def payment_notification_body(payment, outcome='approved', decision_note=''):
     details = [
         f'Amount: {payment.get("amount") or "—"}',
         f'Fee: {payment.get("fee_name") or "School fees"}',
@@ -752,43 +752,77 @@ def payment_notification_body(payment):
     ]
     if payment.get('reference'):
         details.append(f'Payment reference: {payment["reference"]}')
-    if payment.get('receipt_no'):
+    if payment.get('receipt_no') and outcome == 'approved':
         details.append(f'Receipt number: {payment["receipt_no"]}')
     base = public_base_url()
-    portal_path = '/parent/finance' if payment.get('guardian_email') else '/student/finance'
-    details.append(f'Open the school portal to view your fee records: {base}{portal_path}' if base else
-                   f'Open the school portal and sign in to view your fee records.')
-    return f'A payment was recorded for {payment.get("student_name") or "your student"}.\n\n' + '\n'.join(details)
+    portal_path = '/parent/finance' if payment.get('_has_guardian') else '/student/finance'
+    details.append(f'Open the school portal: {base}{portal_path}' if base else
+                   'Open the school portal and sign in to view your fee records.')
+    if outcome == 'rejected':
+        details.append(f'Reason: {decision_note.strip()}' if decision_note and decision_note.strip()
+                       else 'Contact the Bursary for clarification.')
+        return f'The submitted payment receipt for {payment.get("student_name") or "your student"} was not approved.\n\n' + '\n'.join(details)
+    return f'A payment was approved and recorded for {payment.get("student_name") or "your student"}.\n\n' + '\n'.join(details)
 
 
-def notify_payment_contacts(payment):
-    subject = f'Payment approved: {payment.get("fee_name") or "school fees"}'
-    body = payment_notification_body(payment)
-    student_email = str(payment.get('student_email') or '').strip().lower()
-    guardian_email = str(payment.get('guardian_email') or '').strip().lower()
+def notify_payment_contacts(payment, outcome='approved', decision_note=''):
+    """Notify the student and every linked guardian; email guardians, or the student if none exist."""
+    student_id = str(payment.get('student_id') or '')
+    student_data = {}
+    if student_id:
+        with db() as c:
+            row = c.execute("SELECT data FROM records WHERE id=? AND entity='Student'", (student_id,)).fetchone()
+        if row:
+            try:
+                student_data = json.loads(row['data'])
+            except (TypeError, ValueError):
+                student_data = {}
+
+    student_email = str(
+        payment.get('student_email') or student_data.get('user_email') or student_data.get('student_email') or ''
+    ).strip().lower()
+    guardian_emails = _student_contact_emails(student_data)
+    guardian_emails.discard(student_email)
+    guardian_emails.discard('')
+    has_guardian = bool(guardian_emails)
+
+    payment_for_message = dict(payment)
+    payment_for_message['_has_guardian'] = has_guardian
+    subject = (f'Payment approved: {payment.get("fee_name") or "school fees"}'
+               if outcome == 'approved' else
+               f'Payment receipt not approved: {payment.get("fee_name") or "school fees"}')
+    body = payment_notification_body(payment_for_message, outcome, decision_note)
     base = public_base_url()
     student_url = f'{base}/student/finance' if base else '/student/finance'
     guardian_url = f'{base}/parent/finance' if base else '/parent/finance'
-    # Store in-app notifications for both the student and linked parent/guardian.
+
+    # Keep the in-app notification for the student and every linked parent/guardian.
     recipients = {}
-    for email, target_url in ((student_email, student_url), (guardian_email, guardian_url)):
+    contacts = [(student_email, student_url)] + [(email, guardian_url) for email in sorted(guardian_emails)]
+    for email, target_url in contacts:
         if not email:
             continue
         with db() as c:
-            user = c.execute("SELECT id FROM auth_users WHERE lower(email)=? AND account_status='active'", (email,)).fetchone()
-            if user:
-                recipients[user['id']] = target_url
-    with db() as c:
-        for user_id, target_url in recipients.items():
+            user = c.execute(
+                "SELECT id FROM auth_users WHERE lower(email)=? AND account_status='active'",
+                (email,),
+            ).fetchone()
+        if user:
+            recipients[user['id']] = target_url
+    action_label = 'View payment receipt' if outcome == 'approved' else 'View payment status'
+    for user_id, target_url in recipients.items():
+        with db() as c:
             c.execute(
                 'INSERT INTO in_app_notifications(id,user_id,category,subject,body,action_label,created_at,action_url) VALUES(?,?,?,?,?,?,?,?)',
-                (str(uuid.uuid4()), user_id, 'finance', subject, body[:4000], 'View payment receipt', now(), target_url)
+                (str(uuid.uuid4()), user_id, 'finance', subject, body[:4000], action_label, now(), target_url)
             )
-    # Send one email to the guardian when linked; otherwise use the student's email.
-    email_recipient = guardian_email or student_email
-    if email_recipient:
-        target_url = guardian_url if guardian_email else student_url
-        send_mail(email_recipient, subject, body + f'\\n\\nView/print your approved receipt: {target_url}', 'View payment receipt')
+
+    # Email every recorded guardian. Fall back to the student's email only when
+    # the student has no guardian contact recorded.
+    email_recipients = sorted(guardian_emails) if has_guardian else ([student_email] if student_email else [])
+    target_url = guardian_url if has_guardian else student_url
+    for email in email_recipients:
+        send_mail(email, subject, body + f'\n\nOpen your fee records: {target_url}', action_label)
 
 
 def make_invitation(record_id, email, role):
@@ -3701,10 +3735,15 @@ def fee_payment_submission_decision(rid):
         c.execute('UPDATE fee_payment_submissions SET status=?,reviewed_by=?,reviewed_at=?,decision_note=?,payment_record_id=? WHERE id=?',(decision,user['id'],now(),str(body.get('note') or ''),payment_id,rid))
     audit(current_user(),'fee_payment_'+decision,'fee_payment_submission',rid,{'payment_record_id':payment_id})
     if decision == 'rejected':
-        notify_user(row['submitted_by'], 'finance', 'Fee receipt rejected',
-                    f'Your fee payment receipt for {row["student_name"]} was rejected.'
-                    + (f' Note: {body.get("note")}' if body.get('note') else ''),
-                    'View payment status', '/student/finance')
+        notify_payment_contacts({
+            'student_id': row['student_id'],
+            'student_name': row['student_name'],
+            'amount': row['amount'],
+            'fee_name': row['fee_name'],
+            'reference': row['reference'],
+            'session': row['session'],
+            'term': row['term'],
+        }, outcome='rejected', decision_note=str(body.get('note') or ''))
     if decision == 'approved' and payment_id:
         with db() as c:
             payment_row=c.execute("SELECT data FROM records WHERE id=? AND entity='Payment'",(payment_id,)).fetchone()
@@ -4142,27 +4181,44 @@ def workflow_promotions_list():
 def workflow_promotion_create():
     b=request.get_json(silent=True) or {}; required=('student_id','student_name','to_class','session_id','promotion_date')
     if any(not str(b.get(k,'')).strip() for k in required): return jsonify(error='Student, destination class, session and promotion date are required.'),400
+    if not _valid_iso_date(str(b.get('promotion_date') or '')):
+        return jsonify(error='Promotion date must be a valid date (YYYY-MM-DD).'),400
     with db() as c:
-        if not c.execute('SELECT 1 FROM academic_sessions WHERE id=?',(b['session_id'],)).fetchone(): return jsonify(error='Academic session not found.'),400
+        session_row=c.execute('SELECT * FROM academic_sessions WHERE id=?',(b['session_id'],)).fetchone()
+        if not session_row: return jsonify(error='Academic session not found.'),400
+        if session_row['starts_on'] and b['promotion_date'] < session_row['starts_on']:
+            return jsonify(error='Promotion date cannot be before the academic session starts.'),400
+        if session_row['ends_on'] and b['promotion_date'] > session_row['ends_on']:
+            return jsonify(error='Promotion date cannot be after the academic session ends.'),400
         student_row=c.execute("SELECT id,data FROM records WHERE entity='Student' AND (id=? OR json_extract(data,'$.admission_no')=?) LIMIT 1",(str(b['student_id']),str(b.get('admission_number') or b['student_id']))).fetchone()
         if not student_row: return jsonify(error='Student record not found. Use the existing student record ID or admission number.'),404
         student=json.loads(student_row['data']); student_id=student_row['id']
         target_row=c.execute("SELECT id,data FROM records WHERE entity='ClassArm' AND (id=? OR json_extract(data,'$.display_name')=?) LIMIT 1",(str(b['to_class']),str(b['to_class']))).fetchone()
         if not target_row: return jsonify(error='Destination must be an existing class arm or track configured by Admin.'),400
         target=json.loads(target_row['data']); target_class=str(target.get('display_name') or b['to_class']); target_level=str(target.get('level') or '').upper().replace(' ','')
+        if target.get('active', True) is False:
+            return jsonify(error='Students cannot be promoted into an inactive class arm.'),400
         from_class=str(student.get('class_arm_name') or student.get('class_arm_id') or student.get('level') or '').strip()
         from_level=str(student.get('level') or '').upper().replace(' ','')
         old_track=str(student.get('track') or '')
+        if student.get('class_arm_id'):
+            old_row=c.execute("SELECT data FROM records WHERE entity='ClassArm' AND id=?",(student['class_arm_id'],)).fetchone()
+            if old_row:
+                old_class_data=json.loads(old_row['data'])
+                from_level=from_level or str(old_class_data.get('level') or '').upper().replace(' ','')
+                old_track=old_track or str(old_class_data.get('track') or '')
         if not old_track:
             old_track=next((x for x in ('Science','Art','Commercial') if x.lower() in from_class.lower()),'')
-        if not old_track and student.get('class_arm_id'):
-            old_row=c.execute("SELECT data FROM records WHERE entity='ClassArm' AND id=?",(student['class_arm_id'],)).fetchone()
-            if old_row: old_track=str(json.loads(old_row['data']).get('track') or '')
+        level_order=('JSS1','JSS2','JSS3','SS1','SS2','SS3')
+        if from_level not in level_order or target_level not in level_order:
+            return jsonify(error='The student’s current class or destination class is not a recognised JSS1–SS3 level.'),400
+        if level_order.index(target_level) != level_order.index(from_level) + 1:
+            return jsonify(error='Promotion must move a student to the next class level. Use class-arm reassignment for a same-level change.'),400
         new_track=str(target.get('track') or '')
         if from_level=='SS1' and target_level=='SS2' and new_track not in ('Science','Art','Arts','Commercial'):
             return jsonify(error='SS1 to SS2 promotion requires an Admin-assigned Science, Art or Commercial track.'),400
-        if from_level=='SS2' and target_level=='SS3' and old_track and new_track and old_track.lower()!=new_track.lower() and not b.get('admin_track_change_authorised'):
-            return jsonify(error='SS2 to SS3 promotion must retain the same track unless Admin explicitly authorises a change.'),400
+        if from_level=='SS2' and target_level=='SS3' and old_track and new_track and old_track.casefold().replace('arts','art') != new_track.casefold().replace('arts','art'):
+            return jsonify(error='SS2 to SS3 promotion must retain the student’s existing Science, Art or Commercial track. Correct the student’s track before promotion if it is wrong.'),400
         student_name=str(student.get('full_name') or b.get('student_name') or student_id)
         admission=str(student.get('admission_no') or b.get('admission_number') or '')
         history_id=str(uuid.uuid4()); stamp=now()

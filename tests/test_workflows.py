@@ -297,14 +297,24 @@ class WorkflowTests(unittest.TestCase):
             response = self.client.post(f'/api/approvals/{request_id}/decision', json={'decision': 'approved'})
             self.assertEqual(response.status_code, 200, response.get_json())
 
-    def test_receipt_and_school_account_decisions_are_principal_only(self):
+    def test_fee_receipt_decisions_are_bursary_only_while_school_account_decisions_remain_principal_only(self):
         receipt_id = str(uuid.uuid4())
         account_id = str(uuid.uuid4())
         stamp = app.now()
+        bursar_id = self.add_account('bursar@school.test', 'bursar')
+        student_user_id = self.add_account('student@school.test', 'student')
+        parent_user_id = self.add_account('parent@school.test', 'parent')
+        second_parent_user_id = self.add_account('second.parent@school.test', 'parent')
+        student_id = str(uuid.uuid4())
         with app.db() as conn:
+            self.add_record(conn, 'Student', {
+                'full_name': 'Test Student', 'user_email': 'student@school.test',
+                'guardian_email': 'parent@school.test', 'guardian_emails': ['second.parent@school.test'],
+                'admission_no': 'SCH/2026/001', 'class_arm_name': 'JSS1A',
+            }, student_id)
             conn.execute(
                 'INSERT INTO fee_payment_submissions(id,student_id,student_name,amount,paid_on,receipt_uri,session,term,submitted_by,submitted_at,fee_id,fee_name,fee_category) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (receipt_id, 'student-1', 'Test Student', 100, '2026-01-01', '/uploads/receipt.pdf', '2026/2027', 'First Term', 'parent-1', stamp, 'school_fees', 'School fees', 'school_fee'),
+                (receipt_id, student_id, 'Test Student', 100, '2026-01-01', '/uploads/receipt.pdf', '2026/2027', 'First Term', parent_user_id, stamp, 'school_fees', 'School fees', 'school_fee'),
             )
             conn.execute(
                 'INSERT INTO school_payment_accounts(id,bank_name,account_name,account_number,purpose,instructions,status,submitted_by,submitted_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -312,7 +322,7 @@ class WorkflowTests(unittest.TestCase):
             )
 
         self.login()
-        receipt_decision = self.client.post(f'/api/fee-payment-submissions/{receipt_id}/decision', json={'decision': 'rejected'})
+        receipt_decision = self.client.post(f'/api/fee-payment-submissions/{receipt_id}/decision', json={'decision': 'rejected', 'note': 'Receipt is unclear.'})
         account_decision = self.client.post(f'/api/finance/school-accounts/{account_id}/decision', json={'decision': 'approved'})
         self.assertEqual(receipt_decision.status_code, 403)
         self.assertEqual(account_decision.status_code, 403)
@@ -321,8 +331,83 @@ class WorkflowTests(unittest.TestCase):
         self.login('principal@school.test', self.password)
         receipt_decision = self.client.post(f'/api/fee-payment-submissions/{receipt_id}/decision', json={'decision': 'rejected'})
         account_decision = self.client.post(f'/api/finance/school-accounts/{account_id}/decision', json={'decision': 'approved'})
-        self.assertEqual(receipt_decision.status_code, 200, receipt_decision.get_json())
+        self.assertEqual(receipt_decision.status_code, 403)
         self.assertEqual(account_decision.status_code, 200, account_decision.get_json())
+
+        self.client.post('/api/auth/logout')
+        self.login('bursar@school.test', self.password)
+        with patch.object(app, 'send_mail', return_value=(True, None)) as send_mail:
+            receipt_decision = self.client.post(f'/api/fee-payment-submissions/{receipt_id}/decision', json={'decision': 'rejected', 'note': 'Receipt is unclear.'})
+        self.assertEqual(receipt_decision.status_code, 200, receipt_decision.get_json())
+        self.assertEqual(send_mail.call_count, 2)
+        emailed = {call.args[0] for call in send_mail.call_args_list}
+        self.assertEqual(emailed, {'parent@school.test', 'second.parent@school.test'})
+        with app.db() as conn:
+            notified = {row['user_id'] for row in conn.execute('SELECT user_id FROM in_app_notifications WHERE category=?', ('finance',)).fetchall()}
+        self.assertIn(student_user_id, notified)
+        self.assertIn(parent_user_id, notified)
+        self.assertIn(second_parent_user_id, notified)
+
+
+    def test_payment_notification_emails_student_when_no_guardian_is_recorded(self):
+        student_user_id = self.add_account('only.student@school.test', 'student')
+        student_id = str(uuid.uuid4())
+        with app.db() as conn:
+            self.add_record(conn, 'Student', {
+                'full_name': 'Independent Student', 'user_email': 'only.student@school.test',
+                'admission_no': 'SCH/2026/002',
+            }, student_id)
+        with patch.object(app, 'send_mail', return_value=(True, None)) as send_mail:
+            app.notify_payment_contacts({
+                'student_id': student_id, 'student_name': 'Independent Student',
+                'student_email': 'only.student@school.test', 'amount': 2500,
+                'fee_name': 'School fees', 'session': '2026/2027', 'term': 'First Term',
+                'receipt_no': 'RCPT-TEST-001',
+            })
+        self.assertEqual(send_mail.call_count, 1)
+        self.assertEqual(send_mail.call_args.args[0], 'only.student@school.test')
+        with app.db() as conn:
+            notices = conn.execute('SELECT user_id FROM in_app_notifications WHERE user_id=?', (student_user_id,)).fetchall()
+        self.assertTrue(notices)
+
+    def test_student_promotion_requires_next_level_and_preserves_ss_track(self):
+        self.login()
+        session_id = str(uuid.uuid4())
+        jss1_id = str(uuid.uuid4())
+        jss2_id = str(uuid.uuid4())
+        jss3_id = str(uuid.uuid4())
+        student_id = str(uuid.uuid4())
+        ss2_science_id = str(uuid.uuid4())
+        ss3_art_id = str(uuid.uuid4())
+        ss_student_id = str(uuid.uuid4())
+        with app.db() as conn:
+            conn.execute(
+                'INSERT INTO academic_sessions(id,name,starts_on,ends_on,created_by,created_at) VALUES(?,?,?,?,?,?)',
+                (session_id, '2026/2027', '2026-09-01', '2027-07-31', 'test', app.now()),
+            )
+            self.add_record(conn, 'ClassArm', {'level':'JSS 1','arm':'A','track':'','display_name':'JSS1A','active':True}, jss1_id)
+            self.add_record(conn, 'ClassArm', {'level':'JSS 2','arm':'A','track':'','display_name':'JSS2A','active':True}, jss2_id)
+            self.add_record(conn, 'ClassArm', {'level':'JSS 3','arm':'A','track':'','display_name':'JSS3A','active':True}, jss3_id)
+            self.add_record(conn, 'Student', {'full_name':'JSS Student','level':'JSS 1','class_arm_id':jss1_id,'class_arm_name':'JSS1A'}, student_id)
+            self.add_record(conn, 'ClassArm', {'level':'SS 2','arm':'A','track':'Science','display_name':'SS2 Science A','active':True}, ss2_science_id)
+            self.add_record(conn, 'ClassArm', {'level':'SS 3','arm':'A','track':'Art','display_name':'SS3 Art A','active':True}, ss3_art_id)
+            self.add_record(conn, 'Student', {'full_name':'SS Student','level':'SS 2','track':'Science','class_arm_id':ss2_science_id,'class_arm_name':'SS2 Science A'}, ss_student_id)
+
+        skipped = self.client.post('/api/workflows/promotions', json={
+            'student_id':student_id,'student_name':'JSS Student','to_class':jss3_id,
+            'session_id':session_id,'promotion_date':'2027-06-01',
+        })
+        self.assertEqual(skipped.status_code, 400)
+        allowed = self.client.post('/api/workflows/promotions', json={
+            'student_id':student_id,'student_name':'JSS Student','to_class':jss2_id,
+            'session_id':session_id,'promotion_date':'2027-06-01',
+        })
+        self.assertEqual(allowed.status_code, 201, allowed.get_json())
+        track_change = self.client.post('/api/workflows/promotions', json={
+            'student_id':ss_student_id,'student_name':'SS Student','to_class':ss3_art_id,
+            'session_id':session_id,'promotion_date':'2027-06-01','admin_track_change_authorised':True,
+        })
+        self.assertEqual(track_change.status_code, 400)
 
     def test_user_role_cannot_be_invited(self):
         self.login()
