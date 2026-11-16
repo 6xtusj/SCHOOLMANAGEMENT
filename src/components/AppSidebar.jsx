@@ -69,7 +69,7 @@ export const NAV = {
       { to: '/principal/notices', label: 'School notices', icon: MessageSquare },
       { to: '/principal/requests', label: 'Student & parent requests', icon: NotebookPen },
       { to: '/principal/approvals', label: 'Approvals & activity', icon: ClipboardCheck },
-      { to: '/principal/receipt-approvals', label: 'Fee receipt approvals', icon: ClipboardCheck },
+      { to: '/principal/receipt-approvals', label: 'Student payment history', icon: ClipboardCheck },
       { to: '/admin/handover', label: 'Emergency succession', icon: ShieldCheck },
       { to: '/account/profile', label: 'Profile & settings', icon: UserCircle2 },
       { to: '/account/notifications', label: 'Notifications', icon: Bell },
@@ -103,6 +103,7 @@ export const NAV = {
     { group: 'Bursary', items: [
       { to: '/bursary', label: 'Bursary desk', icon: Landmark, end: true },
       { to: '/bursary/payments', label: 'Student payments', icon: Wallet },
+      { to: '/bursary/receipts', label: 'Fee receipt approvals', icon: ClipboardCheck },
       { to: '/bursary/status', label: 'Class fee status', icon: ClipboardCheck },
       { to: '/bursary/fees', label: 'Fee structure', icon: Coins },
       { to: '/bursary/payroll', label: 'Staff payments', icon: Users },

@@ -64,7 +64,7 @@ export default function FeeReceiptSubmission({ student, settings, fees = [] }) {
         body: JSON.stringify({ student_id: student.id, fee_id: feeKey, fee_category: feeKey === 'school_fees' ? 'school_fee' : 'other_fee', amount: amountToSubmit, reference, paid_on: paidOn, receipt_uri: uploaded.file_uri, session: settings?.session, term: settings?.term }),
       });
       setReference(''); setFile(null);
-      await load(); setMessage('Receipt submitted. The Principal will review it before it appears as a payment.');
+      await load(); setMessage('Receipt submitted successfully. The Bursary will verify it before it appears as a confirmed payment.');
     } catch (error) { setMessage(error.message); }
     finally { setBusy(false); }
   };

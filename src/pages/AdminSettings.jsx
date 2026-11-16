@@ -13,6 +13,51 @@ import { Check, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import PublicSiteEditor from '@/components/admin/PublicSiteEditor';
 
+
+function readCsrfCookie() {
+  const prefix = 'school_csrf_token=';
+  return document.cookie.split('; ').find((cookie) => cookie.startsWith(prefix))?.slice(prefix.length) || '';
+}
+
+async function adminApiRequest(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+  let csrfToken = readCsrfCookie();
+  if (unsafe && !csrfToken) {
+    const tokenResponse = await fetch('/api/security/csrf', { credentials: 'same-origin' });
+    const tokenType = tokenResponse.headers.get('content-type') || '';
+    const tokenData = tokenType.includes('application/json') ? await tokenResponse.json().catch(() => ({})) : {};
+    if (!tokenResponse.ok || !tokenData.csrf_token) {
+      throw new Error(`Could not establish a secure session (HTTP ${tokenResponse.status}). Refresh the page and sign in again.`);
+    }
+    csrfToken = tokenData.csrf_token;
+  }
+  const response = await fetch(path, {
+    credentials: 'same-origin',
+    ...options,
+    headers: {
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(unsafe && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  const contentType = response.headers.get('content-type') || '';
+  let data;
+  if (contentType.includes('application/json')) {
+    data = await response.json().catch(() => null);
+  } else {
+    const body = await response.text().catch(() => '');
+    const looksLikeHtml = /<!doctype html|<html[\s>]/i.test(body);
+    const detail = looksLikeHtml
+      ? 'The server returned a web page instead of API data. The deployed backend may be older than this frontend, or the API route is unavailable.'
+      : (body.trim().slice(0, 180) || 'The server returned an unexpected response.');
+    throw new Error(`${detail} (HTTP ${response.status}).`);
+  }
+  if (!response.ok) throw new Error(data?.error || `Request failed (HTTP ${response.status}).`);
+  if (data === null) throw new Error('The server returned invalid JSON. Please try again.');
+  return { data, response };
+}
+
 const blank = {
   school_name: '', school_initials: '', school_logo: '', motto: '', address: '', phone: '', email: '',
   session: '2026/2027', term: 'First Term',
@@ -56,9 +101,7 @@ export default function AdminSettings() {
   const loadEmailDeliveries = useCallback(async (offset = 0, append = false) => {
     setEmailHistoryLoading(true);
     try {
-      const response = await fetch(`/api/admin/email-deliveries?limit=5&offset=${Math.max(0, Number(offset) || 0)}`, { credentials: 'include' });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Could not load email delivery history.');
+      const { data, response } = await adminApiRequest(`/api/admin/email-deliveries?limit=5&offset=${Math.max(0, Number(offset) || 0)}`);
       setEmailDeliveries((current) => append ? [...current, ...data] : data);
       setEmailHistoryHasMore(response.headers.get('X-Has-More') === 'true');
       setEmailLogsError('');
@@ -77,9 +120,7 @@ export default function AdminSettings() {
         setTestRecipient(record.email || '');
       }
       try {
-        const response = await fetch('/api/admin/email-settings');
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Could not load email settings.');
+        const { data } = await adminApiRequest('/api/admin/email-settings');
         setEmailSettings((current) => ({ ...current, ...data }));
         setEmailSecretStatus({
           smtp_password: data.has_smtp_password,
@@ -194,17 +235,14 @@ export default function AdminSettings() {
     setEmailSettingsError('');
     setEmailSettingsSaved(false);
     try {
-      const response = await fetch('/api/admin/email-settings', {
+      await adminApiRequest('/api/admin/email-settings', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...emailSettings,
           ...Object.fromEntries(Object.entries(emailSecrets).filter(([, value]) => value)),
           clear_secrets: clearEmailSecrets,
         }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Email settings could not be saved.');
       setEmailSecretStatus((current) => {
         const next = { ...current };
         Object.entries(emailSecrets).forEach(([key, value]) => {
@@ -230,13 +268,10 @@ export default function AdminSettings() {
     setTestSending(true);
     setTestStatus('');
     try {
-      const response = await fetch('/api/admin/email-test', {
+      const { data } = await adminApiRequest('/api/admin/email-test', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: testRecipient }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Test email could not be sent.');
       setTestStatus(data.message);
       await loadEmailDeliveries();
     } catch (error) {

@@ -13,6 +13,23 @@ const ASSIGNABLE_ROLES = [...ROLES, 'admin', 'user'];
 const STATUSES = ['pending', 'active', 'suspended', 'deactivated'];
 const FILTER_ROLES = ['admin', ...ROLES];
 
+async function copyTextToClipboard(value) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const field = document.createElement('textarea');
+  field.value = value;
+  field.setAttribute('readonly', '');
+  field.style.position = 'fixed';
+  field.style.opacity = '0';
+  document.body.appendChild(field);
+  field.select();
+  const copied = document.execCommand('copy');
+  field.remove();
+  if (!copied) throw new Error('Automatic copying is unavailable. Select the link above and copy it manually.');
+}
+
 export default function PortalAccounts() {
   const { toast } = useToast();
   const { user } = useAuth();
@@ -163,7 +180,7 @@ export default function PortalAccounts() {
         <h3 className="font-heading text-sm font-semibold">Invite someone</h3>
         <p className="mt-1 text-xs text-muted-foreground">Create a portal account and generate a secure invitation link. After the account is active, you can add Teacher or Parent portals in the directory without replacing its main role. Teacher access can also come from a subject assignment; Parent access requires the child's guardian email to match the staff login email.</p>
         <div className="mt-4 space-y-3"><Input placeholder="name@email.com" value={invite.email} onChange={(e) => setInvite({ ...invite, email: e.target.value })} /><Select value={invite.role} onValueChange={(v) => setInvite({ ...invite, role: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{[...ROLES, ...(user?.is_primary_admin ? ['admin'] : [])].map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}</SelectContent></Select><Button onClick={send} disabled={sending || !invite.email.trim()} className="w-full gap-2">{sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />} Send invitation</Button>
-          {delivery && <div className="space-y-2 rounded-lg border border-border p-3 text-xs"><p className="font-medium">{delivery.email_sent ? 'Email delivered to mail server' : 'Email not delivered'}</p><p className="text-muted-foreground">{delivery.email_error || 'The recipient should check their inbox.'}</p>{delivery.invite_url && <><Input readOnly value={delivery.invite_url} className="text-xs" /><Button variant="outline" size="sm" className="w-full gap-2" onClick={() => navigator.clipboard.writeText(delivery.invite_url)}><Copy className="h-3.5 w-3.5" /> Copy secure link</Button></>}</div>}
+          {delivery && <div className="space-y-2 rounded-lg border border-border p-3 text-xs"><p className="font-medium">{delivery.email_sent ? 'Email delivered to mail server' : 'Email not delivered'}</p><p className="text-muted-foreground">{delivery.email_error || 'The recipient should check their inbox.'}</p>{delivery.invite_url && <><p className="text-muted-foreground">{delivery.mode === 'password_reset' ? 'This password-reset link expires in 1 hour.' : 'This invitation link expires in 7 days. If email delivery fails, copy it and share it with the account holder through a trusted channel.'}</p><Input readOnly value={delivery.invite_url} className="text-xs" /><Button variant="outline" size="sm" className="w-full gap-2" onClick={async () => { try { await copyTextToClipboard(delivery.invite_url); toast({ title: 'Secure link copied', description: 'Share it with the account holder through a trusted channel.' }); } catch (error) { toast({ title: 'Could not copy automatically', description: error.message, variant: 'destructive' }); } }}><Copy className="h-3.5 w-3.5" /> Copy secure link</Button></>}</div>}
         </div>
         <p className="mt-4 text-[11px] text-muted-foreground">Use Additional portals to let a staff member switch into Teacher or Parent without changing their main role. Teacher access is also detected from subject/form-teacher assignments. For Parent access, make sure the child's guardian email matches the staff member's login email. Search supports email, name, role, status and account ID. Results are paginated on the server (25, 50 or 100 at a time), so the browser does not load the full school directory. Deleting a portal account removes its login only, not its associated student, teacher or parent record. The primary school administrator is protected.</p>
       </div>

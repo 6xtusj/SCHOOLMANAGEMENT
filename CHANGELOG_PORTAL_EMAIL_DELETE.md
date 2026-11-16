@@ -14,3 +14,9 @@ The previous standalone implementation only created a pending `User` record. It 
 
 ## Required email setup
 Edit `.env` and set SMTP host, port, TLS/SSL mode, SMTP username, SMTP password/app password, sender address, and `PUBLIC_BASE_URL`. Restart the app after editing. For recipients on another device, `PUBLIC_BASE_URL` must be a LAN-reachable address or deployed HTTPS domain; `127.0.0.1` only points to the recipient's own computer.
+
+
+## V9.4.1 email settings fix
+- Added CSRF-aware same-origin requests and JSON/HTML response diagnostics to School Settings email configuration and test-email actions.
+- Unknown API methods now return JSON errors.
+- Improved secure invitation/password-reset link display and copy fallback.

@@ -621,9 +621,47 @@ NOTIFICATION_CATEGORIES = ('finance', 'academics', 'attendance', 'notices', 'req
 DEFAULT_NOTIFICATION_PREFERENCES = {category: True for category in NOTIFICATION_CATEGORIES}
 
 
-def notify_user(user_id, category, subject, body, action_label=None):
+def notification_destination(user_id, category, subject, body):
+    with db() as c:
+        row = c.execute('SELECT role FROM auth_users WHERE id=?', (user_id,)).fetchone()
+    role = str(row['role'] if row else '')
+    text = f'{subject or ""} {body or ""}'.lower()
+    if 'fee receipt' in text or 'payment receipt' in text or 'payment approval' in text:
+        return '/bursary/receipts' if role == 'bursar' else ('/principal/receipt-approvals' if role == 'principal' else '/admin/finance')
+    if 'staff bank' in text or 'bank detail' in text:
+        return '/bursary/staff-bank-details' if role == 'bursar' else '/bursary/staff-bank-details'
+    if 'school payment account' in text or 'school bank account' in text:
+        return '/bursary/school-accounts' if role == 'bursar' else '/principal/approvals'
+    if 'student' in text and ('request' in text or 'parent request' in text):
+        return '/principal/requests' if role == 'principal' else '/admin/requests'
+    if 'admission' in text:
+        return '/admin/admissions'
+    if 'result' in text or 'academic' in text:
+        return '/admin/results' if role in ('admin', 'principal') else '/teacher/results'
+    if category == 'finance':
+        return '/principal/finance' if role == 'principal' else ('/bursary' if role == 'bursar' else '/student/finance')
+    if category == 'requests':
+        return '/principal/requests' if role == 'principal' else '/admin/requests'
+    if category == 'admissions':
+        return '/admin/admissions'
+    if category == 'attendance':
+        return {'student': '/student/attendance', 'parent': '/parent/attendance', 'teacher': '/teacher/attendance'}.get(role, '/admin/attendance')
+    if category == 'notices':
+        return {'student': '/student/notices', 'parent': '/parent/notices', 'teacher': '/teacher/notices'}.get(role, '/admin/resources')
+    if category == 'library':
+        return '/library' if role == 'librarian' else ('/parent/library' if role == 'parent' else '/student/library')
+    if category == 'approvals':
+        return '/bursary/approvals' if role == 'bursar' else ('/principal/approvals' if role == 'principal' else '/admin/approvals')
+    if category == 'operations':
+        return '/account/profile'
+    return '/account/notifications'
+
+
+def notify_user(user_id, category, subject, body, action_label=None, action_url=None):
     if category not in NOTIFICATION_CATEGORIES:
         raise ValueError(f'Unsupported notification category: {category}')
+    if action_url is None:
+        action_url = notification_destination(user_id, category, subject, body)
     with db() as c:
         user = c.execute("SELECT id,email FROM auth_users WHERE id=? AND account_status='active'", (user_id,)).fetchone()
         if not user:
@@ -631,8 +669,8 @@ def notify_user(user_id, category, subject, body, action_label=None):
         row = c.execute('SELECT email_enabled,preferences_json FROM notification_preferences WHERE user_id=?', (user_id,)).fetchone()
         # In-app alerts are always stored. Turning off email must never hide an
         # approval task inside the application.
-        c.execute('INSERT INTO in_app_notifications(id,user_id,category,subject,body,action_label,created_at) VALUES(?,?,?,?,?,?,?)',
-                  (str(uuid.uuid4()), user_id, category, str(subject or 'School notification')[:250], str(body or '')[:4000], action_label, now()))
+        c.execute('INSERT INTO in_app_notifications(id,user_id,category,subject,body,action_label,created_at,action_url) VALUES(?,?,?,?,?,?,?,?)',
+                  (str(uuid.uuid4()), user_id, category, str(subject or 'School notification')[:250], str(body or '')[:4000], action_label, now(), action_url))
     preferences = dict(DEFAULT_NOTIFICATION_PREFERENCES)
     if row:
         try:
@@ -651,15 +689,15 @@ def notify_user(user_id, category, subject, body, action_label=None):
     return bool(sent)
 
 
-def notify_email(email, category, subject, body, action_label=None):
+def notify_email(email, category, subject, body, action_label=None, action_url=None):
     if not email:
         return False
     with db() as c:
         user = c.execute('SELECT id FROM auth_users WHERE lower(email)=? AND account_status=?', (str(email).strip().lower(), 'active')).fetchone()
-    return notify_user(user['id'], category, subject, body, action_label) if user else False
+    return notify_user(user['id'], category, subject, body, action_label, action_url) if user else False
 
 
-def send_notification_email(email, category, subject, body, action_label=None):
+def send_notification_email(email, category, subject, body, action_label=None, action_url=None):
     with db() as c:
         user = c.execute('SELECT id FROM auth_users WHERE lower(email)=? AND account_status=?',
                          (str(email or '').strip().lower(), 'active')).fetchone()
@@ -681,7 +719,7 @@ def notify_student_contacts(student_id, category, subject, body):
         notify_email(email, category, subject, body)
 
 
-def notify_roles(roles, category, subject, body, exclude_user_id=None):
+def notify_roles(roles, category, subject, body, exclude_user_id=None, action_label=None, action_url=None):
     placeholders = ','.join('?' for _ in roles)
     with db() as c:
         users = c.execute(
@@ -689,7 +727,7 @@ def notify_roles(roles, category, subject, body, exclude_user_id=None):
             (*roles, exclude_user_id or ''),
         ).fetchall()
     for user in users:
-        notify_user(user['id'], category, subject, body)
+        notify_user(user['id'], category, subject, body, action_label, action_url)
 
 
 def notify_notice_recipients(notice):
@@ -724,11 +762,33 @@ def payment_notification_body(payment):
 
 
 def notify_payment_contacts(payment):
-    subject = f'Payment recorded: {payment.get("fee_name") or "school fees"}'
+    subject = f'Payment approved: {payment.get("fee_name") or "school fees"}'
     body = payment_notification_body(payment)
-    contacts = {str(payment.get(field) or '').strip().lower() for field in ('student_email', 'guardian_email')}
-    for email in contacts - {''}:
-        send_notification_email(email, 'finance', subject, body)
+    student_email = str(payment.get('student_email') or '').strip().lower()
+    guardian_email = str(payment.get('guardian_email') or '').strip().lower()
+    base = public_base_url()
+    student_url = f'{base}/student/finance' if base else '/student/finance'
+    guardian_url = f'{base}/parent/finance' if base else '/parent/finance'
+    # Store in-app notifications for both the student and linked parent/guardian.
+    recipients = {}
+    for email, target_url in ((student_email, student_url), (guardian_email, guardian_url)):
+        if not email:
+            continue
+        with db() as c:
+            user = c.execute("SELECT id FROM auth_users WHERE lower(email)=? AND account_status='active'", (email,)).fetchone()
+            if user:
+                recipients[user['id']] = target_url
+    with db() as c:
+        for user_id, target_url in recipients.items():
+            c.execute(
+                'INSERT INTO in_app_notifications(id,user_id,category,subject,body,action_label,created_at,action_url) VALUES(?,?,?,?,?,?,?,?)',
+                (str(uuid.uuid4()), user_id, 'finance', subject, body[:4000], 'View payment receipt', now(), target_url)
+            )
+    # Send one email to the guardian when linked; otherwise use the student's email.
+    email_recipient = guardian_email or student_email
+    if email_recipient:
+        target_url = guardian_url if guardian_email else student_url
+        send_mail(email_recipient, subject, body + f'\\n\\nView/print your approved receipt: {target_url}', 'View payment receipt')
 
 
 def make_invitation(record_id, email, role):
@@ -804,6 +864,8 @@ def migrate_schema(c):
     c.execute("CREATE TABLE IF NOT EXISTS email_change_requests (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, new_email TEXT NOT NULL, code_hash TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, verified_at TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS notification_preferences (user_id TEXT PRIMARY KEY REFERENCES auth_users(id) ON DELETE CASCADE, email_enabled INTEGER NOT NULL DEFAULT 1, preferences_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)")
     c.execute("CREATE TABLE IF NOT EXISTS in_app_notifications (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE, category TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, action_label TEXT, created_at TEXT NOT NULL, read_at TEXT)")
+    notification_columns={row['name'] for row in c.execute('PRAGMA table_info(in_app_notifications)').fetchall()}
+    if 'action_url' not in notification_columns: c.execute('ALTER TABLE in_app_notifications ADD COLUMN action_url TEXT')
     c.execute('CREATE INDEX IF NOT EXISTS idx_in_app_notifications_user_created ON in_app_notifications(user_id,created_at DESC)')
     c.execute("CREATE TABLE IF NOT EXISTS user_portal_roles (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE, portal_role TEXT NOT NULL CHECK(portal_role IN ('teacher','parent')), granted_by TEXT NOT NULL, granted_at TEXT NOT NULL, revoked_at TEXT)")
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_portal_roles_active ON user_portal_roles(user_id,portal_role) WHERE revoked_at IS NULL")
@@ -1212,7 +1274,7 @@ def notification_inbox():
     user = current_user()
     try:
         with db() as c:
-            rows = c.execute('SELECT id,category,subject,body,action_label,created_at,read_at FROM in_app_notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 30', (user['id'],)).fetchall()
+            rows = c.execute('SELECT id,category,subject,body,action_label,action_url,created_at,read_at FROM in_app_notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 30', (user['id'],)).fetchall()
             unread = c.execute('SELECT COUNT(*) AS n FROM in_app_notifications WHERE user_id=? AND read_at IS NULL', (user['id'],)).fetchone()['n']
         return jsonify(items=[dict(row) for row in rows], unread_count=int(unread or 0))
     except database_errors():
@@ -3600,17 +3662,14 @@ def fee_payment_submissions():
         sid=str(uuid.uuid4()); stamp=now()
         c.execute('INSERT INTO fee_payment_submissions(id,student_id,student_name,amount,paid_on,reference,receipt_uri,session,term,submitted_by,submitted_at,fee_id,fee_name,fee_category,class_arm_name,admission_no) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(sid,student_id,str(student.get('full_name') or ''),amount,str(body.get('paid_on') or stamp[:10]),str(body.get('reference') or ''),receipt_uri,session_name,term_name,user['id'],stamp,fee_id,fee_name,fee_category,str(student.get('class_arm_name') or ''),str(student.get('admission_no') or '')))
     audit(user,'fee_payment_submitted','fee_payment_submission',sid,{'student_id':student_id,'amount':amount,'fee_id':fee_id,'fee_category':fee_category})
-    notify_roles(('principal',), 'finance', 'Fee receipt needs approval',
-                 f'{student.get("full_name") or "A student"} submitted a fee payment receipt for review.',
-                 exclude_user_id=user['id'])
-    notify_roles(('admin','bursar'), 'finance', 'Fee receipt awaiting Principal review',
-                 f'A fee-transfer receipt for {student.get("full_name") or "a student"} was submitted. The Principal must review it; check the fee receipt approvals area.',
-                 exclude_user_id=user['id'])
+    notify_roles(('bursar',), 'finance', 'Fee receipt awaiting Bursary review',
+                 f'A fee-transfer receipt for {student.get("full_name") or "a student"} was submitted. Review it in Bursary → Fee receipt approvals.',
+                 exclude_user_id=user['id'], action_label='Review payment', action_url='/bursary/receipts')
     return jsonify(id=sid,status='pending'),201
 
 
 @app.post('/api/fee-payment-submissions/<rid>/decision')
-@role_required('principal')
+@role_required('bursar')
 def fee_payment_submission_decision(rid):
     body=request.get_json(silent=True) or {}; decision=str(body.get('decision') or ''); user=current_user()
     if decision not in ('approved','rejected'): return jsonify(error='Decision must be approved or rejected.'),400
@@ -3624,7 +3683,7 @@ def fee_payment_submission_decision(rid):
             student=json.loads(student_row['data']) if student_row else {}
             payment_id=str(uuid.uuid4()); stamp=now()
             payment={
-                'student_id':row['student_id'],'student_name':row['student_name'],'student_email':student.get('user_email',''),
+                'student_id':row['student_id'],'student_name':row['student_name'],'student_email':student.get('user_email') or student.get('student_email') or '',
                 'guardian_email':student.get('guardian_email',''),'admission_no':student.get('admission_no',''),
                 'class_arm_name':row['class_arm_name'] or student.get('class_arm_name',''),'track':student.get('track',''),
                 'fee_id':row['fee_id'],'fee_name':row['fee_name'],'fee_category':row['fee_category'],
@@ -3641,14 +3700,16 @@ def fee_payment_submission_decision(rid):
             c.execute('INSERT INTO records(id,entity,data,created_date,updated_date) VALUES(?,?,?,?,?)',(payment_id,'Payment',json.dumps(payment),stamp,stamp))
         c.execute('UPDATE fee_payment_submissions SET status=?,reviewed_by=?,reviewed_at=?,decision_note=?,payment_record_id=? WHERE id=?',(decision,user['id'],now(),str(body.get('note') or ''),payment_id,rid))
     audit(current_user(),'fee_payment_'+decision,'fee_payment_submission',rid,{'payment_record_id':payment_id})
-    notify_user(row['submitted_by'], 'finance', f'Fee receipt {decision}',
-                f'Your fee payment receipt for {row["student_name"]} was {decision}.'
-                + (f' Note: {body.get("note")}' if body.get('note') else ''))
+    if decision == 'rejected':
+        notify_user(row['submitted_by'], 'finance', 'Fee receipt rejected',
+                    f'Your fee payment receipt for {row["student_name"]} was rejected.'
+                    + (f' Note: {body.get("note")}' if body.get('note') else ''),
+                    'View payment status', '/student/finance')
     if decision == 'approved' and payment_id:
         with db() as c:
             payment_row=c.execute("SELECT data FROM records WHERE id=? AND entity='Payment'",(payment_id,)).fetchone()
         if payment_row:
-            notify_payment_contacts(json.loads(payment_row['data']))
+            notify_payment_contacts(dict(json.loads(payment_row['data']), id=payment_id))
     return jsonify(ok=True,status=decision,payment_record_id=payment_id)
 
 
@@ -3758,7 +3819,7 @@ def _verify_paystack_reference(reference):
         with db() as c:
             payment_row=c.execute("SELECT data FROM records WHERE id=? AND entity='Payment'",(payment_id,)).fetchone()
         if payment_row:
-            notify_payment_contacts(json.loads(payment_row['data']))
+            notify_payment_contacts(dict(json.loads(payment_row['data']), id=payment_id))
     return result,None
 
 
@@ -5007,9 +5068,11 @@ def curriculum_document_decision(rid):
 
 # Client-side routes must return the React entry point on direct navigation/refresh.
 # Keep this catch-all after every API route so unknown API URLs are never mistaken for pages.
-@app.get('/api/<path:api_path>')
+@app.route('/api/<path:api_path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])
 def api_not_found(api_path):
-    return jsonify(error='API endpoint not found.'), 404
+    # Unknown API routes must always return JSON, including unsupported methods.
+    # Otherwise Flask's default HTML 404/405 page breaks frontend JSON handling.
+    return jsonify(error='API endpoint not found. Check that the deployed backend includes this API route.'), 404
 
 @app.get('/<path:path>')
 def spa(path):

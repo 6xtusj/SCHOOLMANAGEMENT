@@ -9,6 +9,7 @@ import StudentPayments from '@/components/bursary/StudentPayments';
 import StaffPayroll from '@/components/bursary/StaffPayroll';
 import SchoolPaymentAccounts from '@/components/bursary/SchoolPaymentAccounts';
 import StaffBankDetails from '@/components/bursary/StaffBankDetails';
+import FeeReceiptReview from '@/components/bursary/FeeReceiptReview';
 import ApprovalPanel from '@/components/ApprovalPanel';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -80,8 +81,8 @@ export default function BursaryPortal() {
 
   const session = settings.session || '2025/2026';
   const term = settings.term || 'First Term';
-  const aliases = { payments: 'desk', receipts: 'approvals' };
-  const allowedTabs = ['desk', 'fees', 'status', 'payroll', 'approvals', 'school-accounts', 'staff-bank-details'];
+  const aliases = { payments: 'desk', receipts: 'receipts' };
+  const allowedTabs = ['desk', 'fees', 'status', 'payroll', 'approvals', 'receipts', 'school-accounts', 'staff-bank-details'];
   const requestedTab = aliases[tab] || tab;
   const current = allowedTabs.includes(requestedTab) ? requestedTab : 'desk';
 
@@ -167,7 +168,7 @@ export default function BursaryPortal() {
               <TabsTrigger value="fees">Fee structure</TabsTrigger>
               <TabsTrigger value="status">Class fee status</TabsTrigger>
               <TabsTrigger value="payroll">Staff payments</TabsTrigger>
-              <TabsTrigger value="approvals">Approval requests</TabsTrigger>
+              <TabsTrigger value="approvals">Approval requests</TabsTrigger>\n              <TabsTrigger value="receipts">Fee receipt approvals</TabsTrigger>
               <TabsTrigger value="school-accounts">School bank accounts</TabsTrigger>
               <TabsTrigger value="staff-bank-details">Staff bank details</TabsTrigger>
             </TabsList>
@@ -195,7 +196,7 @@ export default function BursaryPortal() {
             <TabsContent value="payroll">
               <StaffPayroll staff={staff} payments={staffPayments} reload={load} paymentRequestDay={settings.salary_payment_day || 25} />
             </TabsContent>
-            <TabsContent value="approvals"><ApprovalPanel role="bursar" /></TabsContent>
+            <TabsContent value="approvals"><ApprovalPanel role="bursar" /></TabsContent>\n            <TabsContent value="receipts"><FeeReceiptReview /></TabsContent>
             <TabsContent value="school-accounts"><SchoolPaymentAccounts /></TabsContent>
             <TabsContent value="staff-bank-details"><StaffBankDetails /></TabsContent>
           </Tabs>

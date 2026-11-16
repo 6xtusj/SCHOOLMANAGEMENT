@@ -4,7 +4,7 @@ import FeeReceiptReview from '@/components/bursary/FeeReceiptReview';
 
 export default function PrincipalReceiptApprovals() {
   return <AppShell role="principal">
-    <PageHeader title="Fee receipt approvals" description="Review submitted bank receipts and approve or reject verified payments." />
-    <FeeReceiptReview />
+    <PageHeader title="Student payment history" description="Search and review submitted fee receipts and recorded payment decisions. Payment approval is handled by the Bursary." />
+    <FeeReceiptReview readOnly />
   </AppShell>;
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Bell, CheckCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/use-toast';
@@ -16,6 +17,7 @@ export default function NotificationBell() {
   const [unread, setUnread] = useState(0);
   const [error, setError] = useState('');
   const { toast } = useToast();
+  const navigate = useNavigate();
   const seenIds = useRef(new Set());
   const hasLoaded = useRef(false);
 
@@ -73,7 +75,7 @@ export default function NotificationBell() {
         </div>
         <DropdownMenuSeparator />
         {error ? <p className="px-3 py-4 text-xs text-destructive">{error}</p> : items.length ? items.slice(0, 12).map((item) => (
-          <DropdownMenuItem key={item.id} onSelect={() => !item.read_at && markRead(item.id)} className="block cursor-pointer whitespace-normal py-3">
+          <DropdownMenuItem key={item.id} onSelect={() => { if (!item.read_at) markRead(item.id); if (typeof item.action_url === 'string' && item.action_url.startsWith('/') && !item.action_url.startsWith('//')) navigate(item.action_url); }} className="block cursor-pointer whitespace-normal py-3">
             <div className="flex items-start gap-2">
               <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${item.read_at ? 'bg-muted-foreground/30' : 'bg-primary'}`} />
               <div className="min-w-0 flex-1"><p className="text-xs font-semibold">{item.subject}</p><p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{item.body}</p><p className="mt-1 text-[10px] text-muted-foreground">{new Date(item.created_at).toLocaleString()}</p></div>

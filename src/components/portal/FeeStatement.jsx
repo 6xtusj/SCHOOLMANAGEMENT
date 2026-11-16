@@ -1,5 +1,30 @@
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { billingFor, naira, paidFor } from '@/lib/school';
+
+
+function printPaymentReceipt(student, payment) {
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+  const rows = [
+    ['Receipt number', payment.receipt_no || payment.id || '—'],
+    ['Student', student.full_name || payment.student_name || '—'],
+    ['Admission number', student.admission_no || payment.admission_no || '—'],
+    ['Class', student.class_arm_name || payment.class_arm_name || '—'],
+    ['Fee', payment.fee_name || 'School fees'],
+    ['Amount', `₦${Number(payment.amount || 0).toLocaleString()}`],
+    ['Payment date', payment.paid_on || '—'],
+    ['Payment method', payment.method || '—'],
+    ['Reference', payment.reference || '—'],
+    ['Academic session', payment.session || '—'],
+    ['Term', payment.term || '—'],
+    ['Status', 'APPROVED · RECORDED BY SCHOOL'],
+  ];
+  const popup = window.open('', '_blank', 'width=760,height=850');
+  if (!popup) return;
+  popup.document.write(`<!doctype html><html><head><title>Payment receipt</title><style>body{font:14px Arial,sans-serif;color:#111;padding:36px;max-width:720px;margin:auto}h1{text-align:center;font-size:22px}p{text-align:center;color:#555}.row{display:flex;justify-content:space-between;gap:20px;padding:12px 4px;border-bottom:1px solid #ddd}.status{margin-top:24px;padding:14px;background:#eef8ef;text-align:center;font-weight:bold}@media print{button{display:none}body{padding:0}}</style></head><body><h1>OFFICIAL PAYMENT RECEIPT</h1><p>School fee payment confirmation</p>${rows.map(([label,value])=>`<div class="row"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value)}</span></div>`).join('')}<div class="status">PAYMENT APPROVED</div><p>This receipt confirms that the payment has been recorded in the school's payment ledger.</p><button onclick="window.print()">Print receipt</button></body></html>`);
+  popup.document.close();
+  popup.focus();
+}
 
 export default function FeeStatement({ student, fees, payments, session, term }) {
   const billed = billingFor(student, fees, session, term);
@@ -61,6 +86,7 @@ export default function FeeStatement({ student, fees, payments, session, term })
                 <td className="px-4 py-2 text-right">
                   <p className="tabular-nums">{naira(p.amount)}</p>
                   <Badge variant="secondary" className="mt-1 text-[10px] capitalize">{p.type}</Badge>
+                  {p.type === 'payment' && <Button type="button" size="sm" variant="outline" className="mt-2 h-7 text-xs" onClick={() => printPaymentReceipt(student, p)}>Print receipt</Button>}
                 </td>
               </tr>
             ))}
